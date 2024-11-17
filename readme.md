@@ -28,12 +28,13 @@
 <div align="center">
   <a href="https://github.com/MohamedKeteb/Portfolio_clustering_project/">
     <img src="https://upload.wikimedia.org/wikipedia/commons/e/ec/LOGO-ENSAE.png" alt="Logo" width="200" height="200">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/University_of_Oxford.svg/1920px-University_of_Oxford.svg.png" alt="Logo" width="300" height="100">
   </a>
 
-  <h3 align="center">Portfolio Construction and Realized Covariance Forecasting with Clustering</h3>
+  <h3 align="center">Cluster-driven Hierarchical Representation of Large Asset Universes for Optimal Portfolio Construction</h3>
 
   <p align="center">
-    Jérome Allier - Mohamed Keteb - Naïl Khelifa
+    Naïl Khelifa - Jérome Allier - Mihai Cucuringu
     <br />
     <br />
     <br />
@@ -69,7 +70,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Welcome to our research project repository! This endeavor is a collaborative effort by three ENSAE students: Jérôme Allier, Nail Khelifa, and Mohammed Keteb. We are honored to be supervised by Professor Mihai Cucuringu from the University of Oxford.
+Welcome to our research project repository! This endeavor is a collaborative effort by two ENSAE students: Jérôme Allier and Nail Khelifa. We are honored to be supervised by Professor Mihai Cucuringu from the University of Oxford.
 
 The central theme of our research revolves around the application of clustering in portfolio construction and forecasting realized covariance. Our goal is to shed light on how clustering can enhance traditional portfolio construction methods and potentially provide a more optimal risk-return tradeoff.
 
