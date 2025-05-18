@@ -33,7 +33,7 @@
   <h3 align="center">Cluster-driven Hierarchical Representation of Large Asset Universes for Optimal Portfolio Construction</h3>
 
   <p align="center">
-    Hong Kiat Tan - James Chen - Haoyang Hyu - Mihai Cucuringu
+    Hong Kiat Tan - James Chen - Haoyang Lyu - Mihai Cucuringu
     <br />
     <br />
     <br />
