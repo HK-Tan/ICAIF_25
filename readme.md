@@ -26,15 +26,14 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/MohamedKeteb/Portfolio_clustering_project/">
-    <img src="https://upload.wikimedia.org/wikipedia/commons/e/ec/LOGO-ENSAE.png" alt="Logo" width="200" height="200">
-    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/University_of_Oxford.svg/1920px-University_of_Oxford.svg.png" alt="Logo" width="300" height="100">
+  <a>
+    <img src="https://upload.wikimedia.org/wikipedia/commons/9/9d/University_of_California%2C_Los_Angeles_logo.png" alt="Logo" width="300" height="100">
   </a>
 
   <h3 align="center">Cluster-driven Hierarchical Representation of Large Asset Universes for Optimal Portfolio Construction</h3>
 
   <p align="center">
-    Naïl Khelifa - Jérome Allier - Mihai Cucuringu
+    Hong Kiat Tan - James Chen - Haoyang Hyu - Mihai Cucuringu
     <br />
     <br />
     <br />
@@ -99,7 +98,7 @@ Use the `README.md` to get started.
 
 ### Prerequisites
 
-This project is built on two major external library: 
+This project is built on two major external library:
 * [SigNet](https://github.com/alan-turing-institute/SigNet): library that implements specific graph clustering algorithms.
   ```sh
   pip install git+https://github.com/alan-turing-institute/SigNet.git
@@ -121,7 +120,7 @@ Everyones of those following files are in the folder **Code**.
 
 2. **Data**: csv file containing the daily return of the assets that compose our portfolio.
 
-3. **SigNet** (temporary): file copy of the relevant part of [Signet](https://github.com/alan-turing-institute/SigNet) for our coding implementation. It is temporary as we have not found a way to use externally the code in the SigNet repository. 
+3. **SigNet** (temporary): file copy of the relevant part of [Signet](https://github.com/alan-turing-institute/SigNet) for our coding implementation. It is temporary as we have not found a way to use externally the code in the SigNet repository.
 
 <!-- ### Installation
 
@@ -161,7 +160,7 @@ Don't forget to give the project a star! Thanks again!
 1. Fork the Project
 2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch 
+4. Push to the Branch
 5. Open a Pull Request
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -181,9 +180,9 @@ Distributed under the MIT License. See `LICENSE.txt` for more information.
 ## Contact
 
 - Naïl Khelifa - nail.khelifa@ensae.fr
-  
+
 - Jérôme Allier - jerome.allier@ensae.fr
-  
+
 - Mohamed Keteb - mohamed.keteb@ensae.fr
 
 [Project Link](https://github.com/MohamedKeteb/Portfolio_clustering_project/)
