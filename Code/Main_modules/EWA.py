@@ -423,4 +423,3 @@ def EMA_CV(data, beta, lookback_window, number_of_folds):
     Sigma = pd.DataFrame(index=data.columns, columns=data.columns, data=np.real(Sigma))
 
     return Sigma
-

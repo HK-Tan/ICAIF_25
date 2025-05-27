@@ -375,37 +375,3 @@ def portfolio_pnl_sharpe(clusters_returns, weights, risk_free_rate=0.03):
     sharpe_ratio = (expected_portfolio_return - risk_free_rate) / portfolio_std_dev
 
     return pnl, sharpe_ratio
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
