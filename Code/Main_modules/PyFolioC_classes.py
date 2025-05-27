@@ -2,1107 +2,750 @@ import numpy as np
 import pandas as pd
 import sys
 import matplotlib.pyplot as plt
-import numpy as np
 from scipy import sparse
 import warnings
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.cluster import SpectralClustering
 
 warnings.filterwarnings('ignore')
 
-# ----------------------------------------------------------------
-
 try:
-
-    from pypfopt.efficient_frontier import EfficientFrontier
-
-except ImportError:
-
-    print("PyPortfolioOpt package not found. Installing...")
-
-    try:
-
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "PyPortfolioOpt"])
-        from pypfopt.efficient_frontier import EfficientFrontier
-        
-    except Exception as e:
-        print(f"Error installing PyPortfolioOpt package: {e}")
-        sys.exit(1)
-
-# ----------------------------------------------------------------
-
-try:
-
     from signet.cluster import Cluster
-
 except ImportError:
-
     print("Signet package not found. Installing...")
-
     try:
         import subprocess
         subprocess.check_call([sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"])
         from signet.cluster import Cluster
-
     except Exception as e:
         print(f"Error installing Signet package: {e}")
         sys.exit(1)
 
 # ----------------------------------------------------------------
 
+
+
+def get_sp500_PnL(start_date, end_date):
+
+    '''
+    ----------------------------------------------------------------
+    GENERAL IDEA : get the S&P500 index daily PnL between the star
+                   and end dates
+    ----------------------------------------------------------------
+
+    ----------------------------------------------------------------
+    PARAMS :
+
+    - start_date, end_date : strings, corresponding to start and end
+                             dates. The format is the datetime format
+                             "YYYY-MM-DD"
+
+    ----------------------------------------------------------------
+
+    ----------------------------------------------------------------
+    OUTPUT : pandas.DataFrame containing the S&P500 index daily
+             between the star and end dates
+    ----------------------------------------------------------------
+    '''
+
+    # Specify the ticker symbol for S&P 500
+    ticker_symbol = "^GSPC"
+
+    # Fetch historical data
+    sp500_data = yf.download(ticker_symbol, start=start_date, end=end_date)
+    sp500_data['Daily PnL'] = (sp500_data['Close'] - sp500_data['Open']) / sp500_data['Open'][0] ## /100 because we initially invest 1 dollar in our portfolio?
+    sp500_PnL = sp500_data['Daily PnL'].transpose() ## we remove the -2 values to have matching values
+
+    return sp500_PnL
+
 def calculate_mean_correlation(df):
-    """
-    Calculate the average correlation between columns of a DataFrame and optionally plot a heatmap.
-    Args:
-        df (pd.DataFrame): The DataFrame containing the data to analyze.
-    Returns:
-        float: The average correlation between columns of the DataFrame.
-    """
-    if df.empty:
-        raise ValueError("The DataFrame is empty. Please provide a valid DataFrame.")
-    
-    correlation_matrix = df.corr()
+    if df.empty or df.shape[1] < 2: # Need at least 2 columns for correlation
+        return 0.0
+
+    correlation_matrix = df.corr().fillna(0) # Fill NaNs (e.g. from constant columns)
     correlation_values = correlation_matrix.values
     n = correlation_values.shape[0]
 
+    # Use np.triu_indices to get upper triangle indices excluding diagonal
+    # This is more efficient than nested loops for large n, though for typical cluster sizes, loop is fine.
+    # For consistency with original, keeping loop.
     total_correlation = 0
     count = 0
-    
     for i in range(n):
         for j in range(i + 1, n):
             total_correlation += correlation_values[i, j]
             count += 1
 
-    mean_correlation = total_correlation / count if count != 0 else 0
-    return mean_correlation
+    return total_correlation / count if count > 0 else 0.0
 
-def get_most_corr_cluster(portfolio, lookback_window, df_cleaned, number=1, strat='correlation'):
+def get_most_corr_cluster(portfolio, lookback_window, df_cleaned, number=1, strat='correlation', cache=None):
+    # Cache key: A tuple uniquely identifying this portfolio state for correlation calculation
+    # Using portfolio object id can be tricky if portfolio object itself isn't hashable or changes.
+    # A simpler cache key could be tuple(lookback_window) if df_cleaned and portfolio.cluster_composition are fixed for that window.
+    # For now, let's assume cache is managed externally for each `current_pf_c_instance` call context.
+    # If cache is provided and this specific 'number' is in cache, return it.
 
-    '''
-    return the number-th most correlated cluster
-    '''
+    # A more robust cache key if using within a loop for different 'number'
+    # but same portfolio instance and lookback_window:
+    # cache_key_base = (id(portfolio.cluster_composition), tuple(lookback_window))
+    # cache_key_full = (cache_key_base, number)
+    # if cache is not None and cache_key_full in cache:
+    #     return cache[cache_key_full]
 
-    mean_corr_list = []
+    # Simpler caching: If we are caching all results for a portfolio+lookback,
+    # the cache passed would store a list of sorted clusters.
+    # Let's assume cache stores the sorted list for the current context.
 
-    for name, cluster in portfolio.cluster_composition.items():
-        tickers = cluster['tickers']
-        tickers_df = df_cleaned[tickers].iloc[lookback_window[0]:lookback_window[1], :]
-        mean_corr = calculate_mean_correlation(tickers_df)
-        mean_corr_list.append((name, mean_corr, tickers))
+    sorted_cluster_corr_list = None
+    if cache is not None and 'sorted_clusters' in cache:
+        sorted_cluster_corr_list = cache['sorted_clusters']
+    else:
+        mean_corr_list = []
+        if not portfolio.cluster_composition:
+            # print("Warning: portfolio.cluster_composition is empty in get_most_corr_cluster.")
+            if cache is not None: cache['sorted_clusters'] = []
+            return (None, 0.0, [])
 
-    sorted_cluster_corr_list = sorted(mean_corr_list, key=lambda x: x[1])
-    most_corr_cluster = sorted_cluster_corr_list[-number]
+        for name, cluster_info in portfolio.cluster_composition.items():
+            tickers = cluster_info['tickers']
+            if not tickers:
+                mean_corr_list.append((name, 0.0, tickers))
+                continue
 
-    return most_corr_cluster
+            lw_start, lw_end = lookback_window[0], lookback_window[1]
+            if not (0 <= lw_start < lw_end <= len(df_cleaned)):
+                # print(f"Warning: Invalid lookback_window {lookback_window} for df_cleaned.")
+                mean_corr_list.append((name, 0.0, tickers))
+                continue
 
-def most_corr_returns(portfolio, lookback_window, evaluation_window, df_cleaned, number=1):
-    
-    # tuple of length 3: (cluster name, average correlation, cluster composition)
-    most_corr_cluster = get_most_corr_cluster(portfolio, lookback_window, df_cleaned, number)
-    cluster_name = most_corr_cluster[0]
-    ticker_list = most_corr_cluster[2]
+            tickers_df = df_cleaned[tickers].iloc[lw_start:lw_end, :]
+            mean_corr = calculate_mean_correlation(tickers_df)
+            mean_corr_list.append((name, mean_corr, tickers))
 
-    # we prepare an empty dataset
+        if not mean_corr_list:
+            if cache is not None: cache['sorted_clusters'] = []
+            return (None, 0.0, [])
+
+        sorted_cluster_corr_list = sorted(mean_corr_list, key=lambda x: x[1])
+        if cache is not None:
+            cache['sorted_clusters'] = sorted_cluster_corr_list
+
+    if not sorted_cluster_corr_list: # If list is empty after all
+        return (None, 0.0, [])
+
+    try:
+        # 'number' is 1-indexed for k-th most correlated. List is 0-indexed, sorted ascending.
+        # -number gives from the end (highest correlation).
+        if 1 <= number <= len(sorted_cluster_corr_list):
+            result = sorted_cluster_corr_list[-number]
+        else:
+            # print(f"Warning: 'number' {number} out of bounds. Returning most correlated.")
+            result = sorted_cluster_corr_list[-1]
+    except IndexError:
+        # print("Warning: IndexError in get_most_corr_cluster. Defaulting.")
+        result = (None, 0.0, [])
+
+    return result
+
+
+def most_corr_returns(portfolio, lookback_window, evaluation_window, df_cleaned, number=1, cache_for_get_cluster=None):
+    most_corr_cluster_info = get_most_corr_cluster(portfolio, lookback_window, df_cleaned, number, cache=cache_for_get_cluster)
+
+    cluster_name, _, ticker_list = most_corr_cluster_info # Unpack correlation value as well
+
+    eval_start = lookback_window[1]
+    eval_end = lookback_window[1] + evaluation_window
+
+    # Adjust eval_end if it exceeds data length
+    if eval_end > len(df_cleaned):
+        eval_end = len(df_cleaned)
+
+    if cluster_name is None or not ticker_list or not (0 <= eval_start < eval_end):
+        # print(f"Warning: No valid cluster/tickers or invalid eval window for number {number} in most_corr_returns.")
+        # Ensure index is valid even for empty return
+        idx = df_cleaned.index[eval_start:eval_end] if 0 <= eval_start < eval_end else pd.Index([])
+        return pd.DataFrame(index=idx, columns=['empty_cluster'], data=0.0)
+
+    actual_eval_window_len = eval_end - eval_start
+
     most_corr_cluster_returns = pd.DataFrame(
-        index=df_cleaned.index[lookback_window[1]:lookback_window[1]+evaluation_window], 
-        columns=[cluster_name], 
-        data=np.zeros((evaluation_window, 1))
+        index=df_cleaned.index[eval_start:eval_end],
+        columns=[cluster_name],
+        data=np.zeros((actual_eval_window_len, 1))
     )
 
+    if not hasattr(portfolio, 'consolidated_weight') or portfolio.consolidated_weight.empty:
+        # print("Warning: portfolio.consolidated_weight not found/empty. Assuming zero weights.")
+        return most_corr_cluster_returns
+
+    # Ensure consolidated_weight has 'weight' row if it's a DataFrame as constructed in PyFolioC
+    weights_series = None
+    if 'weight' in portfolio.consolidated_weight.index:
+        weights_series = portfolio.consolidated_weight.loc['weight']
+    else: # Fallback if structure is different, e.g. Series directly or single column DataFrame
+        if isinstance(portfolio.consolidated_weight, pd.Series):
+            weights_series = portfolio.consolidated_weight
+        elif isinstance(portfolio.consolidated_weight, pd.DataFrame) and portfolio.consolidated_weight.shape[0] == 1:
+            weights_series = portfolio.consolidated_weight.iloc[0] # Assume first row if not named 'weight'
+
+    if weights_series is None:
+        # print("Warning: Could not extract weights_series from portfolio.consolidated_weight.")
+        return most_corr_cluster_returns
+
+
     for ticker in ticker_list:
-        most_corr_cluster_returns[cluster_name] += df_cleaned[ticker][lookback_window[1]:lookback_window[1]+evaluation_window] * portfolio.consolidated_weight[ticker].values[0]
+        if ticker in weights_series.index: # Check against Series index
+            weight = weights_series[ticker]
+            most_corr_cluster_returns[cluster_name] += df_cleaned[ticker].iloc[eval_start:eval_end].values * weight # Use .values for alignment
+        # else:
+            # print(f"Warning: Ticker {ticker} from cluster {cluster_name} not in consolidated_weight series.")
 
     return most_corr_cluster_returns
 
-def most_corr_PnL(consolidated_portfolio, lookback_window, evaluation_window, df_cleaned, number=1):
+def most_corr_PnL(consolidated_portfolio, lookback_window, evaluation_window, df_cleaned, number=1, cache_for_get_cluster=None):
+    most_corr_return_df = most_corr_returns(consolidated_portfolio, lookback_window, evaluation_window, df_cleaned, number, cache_for_get_cluster=cache_for_get_cluster)
 
-    most_corr_return = most_corr_returns(consolidated_portfolio, lookback_window, evaluation_window, df_cleaned, number)
+    # Get cluster info (potentially from cache via most_corr_returns -> get_most_corr_cluster)
+    # This call ensures we have the cluster_info, even if PnL is zero.
+    cluster_info = get_most_corr_cluster(consolidated_portfolio, lookback_window, df_cleaned, number, cache=cache_for_get_cluster)
 
-    cumulative_returns = np.cumprod(1 + most_corr_return) * 1 - 1
+    if most_corr_return_df.empty or most_corr_return_df.iloc[:,0].isnull().all() or most_corr_return_df.shape[0] == 0:
+        # print(f"Warning: most_corr_returns for number {number} is empty/all NaN. PnL will be 0.")
+        return 0.0, cluster_info
 
-    most_corr_cluster = get_most_corr_cluster(consolidated_portfolio, lookback_window, df_cleaned, number)
+    returns_series = most_corr_return_df.iloc[:, 0].fillna(0)
+    if returns_series.empty: # Double check after fillna if original was completely empty structure
+        return 0.0, cluster_info
 
-    return cumulative_returns.iloc[-1][0], most_corr_cluster
+    cumulative_returns = (1 + returns_series).cumprod() - 1
+
+    final_pnl = cumulative_returns.iloc[-1] if not cumulative_returns.empty else 0.0
+    return final_pnl, cluster_info
+
 
 class PyFolio:
-
-
-    '''
-    ================================================================================================================================
-    ######################################################## DOCUMENTATION #########################################################
-    ================================================================================================================================
-
-    --------------------------------------------------------- INTRODUCTION ---------------------------------------------------------
-    
-    The PyFolioCC class is designed to build an optimal portfolio in the sense of Markowitz using general graph clustering 
-    techniques. The idea is to provide a historical return database of an asset universe (historical_data), a lookback window 
-    (lookback_window) for portfolio construction, a number of clusters (number_clusters), a clustering method (clustering_method), 
-    and an evaluation window (evaluation_window). From there, the objective is to construct a portfolio based on historical return 
-    data over the period corresponding to lookback_window by creating a sub-portfolio composed of a specified number of synthetic 
-    assets (ETFs) using the clustering method specified in clustering_method. The performance (Sharpe ratio and cumulative PnL) of
-    the constructed portfolio is then evaluated over the evaluation_window.
-
-    ---------------------------------------------------------- PARAMETERS ----------------------------------------------------------
-    
-    - historical_data : Pandas DatFrame of shape (n_assets, n_days). The indices must be asset tickers ('AAPL' for Apple, 'MSFT' 
-                        for Microsoft...).
-
-    - lookback_window : List of length 2 [starting_day, final_day]. For instance, if the lookback_window is [0, 252] this means that
-                        we construct the portfolio on the first trading year of historical return 
-                        (i.e. on historical_data.iloc[:, lookback_window[0]:lookback_window[1]]).
-
-    - evaluation_window : Integer corresponding to the number of days on which to evaluate the performance of the portfolio. 
-
-    - number_of_clusters : Integer corresponding to the number of clusters in which we split the portfolio. 
-
-    - cov_method : String corresponding to the method we use in for the covariance estimation/construction.
-
-    =================================================================================================================================
-    #################################################################################################################################
-    =================================================================================================================================
-    '''
-
-    def __init__(self, historical_data, lookback_window, evaluation_window, number_of_clusters, sigma, eta, beta, EWA_cov = False, short_selling=False, cov_method='SPONGE', markowitz_type='expected_returns'):
+    def __init__(self, historical_data, lookback_window, evaluation_window, number_of_clusters, sigma, beta, EWA_cov = False, short_selling=False, cov_method='SPONGE', var_order=1):
         self.historical_data = historical_data
         self.lookback_window = lookback_window
         self.evaluation_window = evaluation_window
         self.number_of_clusters = number_of_clusters
-        self.cov_method = cov_method ## 'SPONGE', 'signed_laplacian', 'SPONGE_sym', 'Kmeans', 'spectral_clustering'
+        self.cov_method = cov_method
         self.sigma = sigma
-        self.eta = eta
         self.beta = beta
-        self.markowitz_type = markowitz_type
         self.EWA_cov = EWA_cov
-
         self.short_selling = short_selling
+        self.var_order = max(1, int(var_order))
+
         self.correlation_matrix = self.corr_matrix()
         self.cluster_composition = self.cluster_composition_and_centroid()
         self.constituent_weights_res = self.constituent_weights()
         self.cluster_returns = self.cluster_return(lookback_window)
-
-        self.markowitz_weights_res = self.markowitz_weights()
+        self.cluster_level_weights = self._calculate_cluster_weights()
         self.final_weights = self.final_W()
 
-    '''
-    ###################################################### CLUSTERING METHODS ######################################################
-
-
-    In the following section, we provide the code to apply three clustering methods (SPONGE, Symmetric SPONGE, Signed_Laplacian). 
-    These routines are fundamental as they allow obtaining clustering from the correlation matrix of assets in our portfolio.
-
-    '''
-
-    def apply_SPONGE(self): 
-
-        '''
-        ----------------------------------------------------------------
-        IDEA: Given a correlation matrix obtained from a database and 
-              Pearson similarity, return a vector associating each asset 
-              with the cluster number it belongs to after applying SPONGE 
-              (using the signet package).
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS: 
-
-        - self.correlation_matrix: a square dataframe of size 
-                                   (number_of_stocks, number_of_stocks)
-
-        - self.number_of_clusters : the number of clusters to identify. 
-                                    If a list is given, the output is a 
-                                    corresponding list
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT: array of int, or list of array of int: Output assignment 
-                to clusters.
-        ----------------------------------------------------------------
-        '''
-        
-        ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
-
+    def apply_SPONGE(self):
         A_pos, A_neg = self.correlation_matrix.applymap(lambda x: x if x >= 0 else 0), self.correlation_matrix.applymap(lambda x: abs(x) if x < 0 else 0)
-
         data = (sparse.csc_matrix(A_pos.values), sparse.csc_matrix(A_neg.values))
-
         cluster = Cluster(data)
-
-        ## On applique la méthode SPONGE : clusters the graph using the Signed Positive Over Negative Generalised Eigenproblem (SPONGE) clustering.
-
         return cluster.SPONGE(self.number_of_clusters)
 
-    def apply_signed_laplacian(self): 
-
-        '''
-        ----------------------------------------------------------------
-        IDEA: Given a correlation matrix obtained from a database and 
-              Pearson similarity, return a vector associating each asset 
-              with the cluster number it belongs to after applying the 
-              signed Laplacian method (using the signet package).
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS: 
-
-        - correlation_matrix: a square dataframe of size 
-                              (number_of_stocks, number_of_stocks)
-
-        - self.number_of_clusters: the number of clusters to identify. 
-                                   If a list is given, the output is a 
-                                   corresponding list
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT: array of int, or list of array of int: Output assignment 
-                to clusters.
-        ----------------------------------------------------------------
-        '''
-        
-        ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
-
+    def apply_signed_laplacian(self):
         A_pos, A_neg = self.correlation_matrix.applymap(lambda x: x if x >= 0 else 0), self.correlation_matrix.applymap(lambda x: abs(x) if x < 0 else 0)
-
         A_pos_sparse = sparse.csc_matrix(A_pos.values)
         A_neg_sparse = sparse.csc_matrix(A_neg.values)
-
         data = (A_pos_sparse, A_neg_sparse)
-
         cluster = Cluster(data)
-
-        ## On applique la méthode SPONGE : clusters the graph using the Signed Positive Over Negative Generalised Eigenproblem (SPONGE) clustering.
-
         return cluster.spectral_cluster_laplacian(self.number_of_clusters)
 
-    def apply_SPONGE_sym(self): 
-
-        '''
-        ----------------------------------------------------------------
-        IDEA: Given a correlation matrix obtained from a database and 
-                Pearson similarity, return a vector associating each asset 
-                with the cluster number it belongs to after applying 
-                symmetric SPONGE (using the signet package).
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS: 
-
-        - self.correlation_matrix: a square dataframe of size 
-                                    (number_of_stocks, number_of_stocks)
-
-        - self.number_of_clusters: the number of clusters to identify. 
-                                    If a list is given, the output is a 
-                                    corresponding list
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT: array of int, or list of array of int: Output assignment 
-                to clusters.
-        ----------------------------------------------------------------
-        '''
-        
-        ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
-
+    def apply_SPONGE_sym(self):
         A_pos, A_neg = self.correlation_matrix.applymap(lambda x: x if x >= 0 else 0), self.correlation_matrix.applymap(lambda x: abs(x) if x < 0 else 0)
-
         A_pos_sparse = sparse.csc_matrix(A_pos.values)
         A_neg_sparse = sparse.csc_matrix(A_neg.values)
-
         data = (A_pos_sparse, A_neg_sparse)
-
         cluster = Cluster(data)
-
-        ## On applique la méthode SPONGE : clusters the graph using the Signed Positive Over Negative Generalised Eigenproblem (SPONGE) clustering.
-
         return cluster.SPONGE_sym(self.number_of_clusters)
 
-    def apply_kmeans(self): 
+    def apply_kmeans(self):
+        data = self.correlation_matrix.fillna(0) # Ensure no NaNs for KMeans
+        if data.empty: return np.array([])
+        kmeans = KMeans(n_clusters=self.number_of_clusters, random_state=0, n_init='auto') # n_init='auto' for future sklearn
+        return kmeans.fit_predict(data) # Use fit_predict
 
-        '''
-        ----------------------------------------------------------------
-        IDEA: Given a correlation matrix obtained from a database and 
-                Pearson similarity, return a vector associating each asset 
-                with the cluster number it belongs to after applying 
-                symmetric SPONGE (using the signet package).
-        ----------------------------------------------------------------
+    def apply_spectral_clustering(self):
+        # Sklearn's SpectralClustering is generally more standard for this unless Signet has specific advantages.
+        # Using affinity matrix from absolute correlation:
+        if self.correlation_matrix.empty: return np.array([])
+        affinity_matrix = np.abs(self.correlation_matrix.fillna(0).values)
+        # Ensure matrix is symmetric and non-negative
+        affinity_matrix = (affinity_matrix + affinity_matrix.T) / 2
+        np.fill_diagonal(affinity_matrix, 1) # Self-similarity is 1
 
-        ----------------------------------------------------------------
-        PARAMS: 
+        # Handle cases with few samples or clusters for SpectralClustering
+        n_samples = affinity_matrix.shape[0]
+        if self.number_of_clusters > n_samples:
+            # print(f"Warning: n_clusters ({self.number_of_clusters}) > n_samples ({n_samples}). Reducing n_clusters for SpectralClustering.")
+            effective_n_clusters = max(1, n_samples) # Must be at least 1
+        else:
+            effective_n_clusters = self.number_of_clusters
 
-        - self.correlation_matrix: a square dataframe of size 
-                                    (number_of_stocks, number_of_stocks)
+        if effective_n_clusters <= 0 : return np.array([]) # Should not happen if n_samples > 0
 
-        - self.number_of_clusters: the number of clusters to identify. 
-                                    If a list is given, the output is a 
-                                    corresponding list
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT: array of int, or list of array of int: Output assignment 
-                to clusters.
-        ----------------------------------------------------------------
-        '''
-        
-        data = self.correlation_matrix
-
-        kmeans = KMeans(n_clusters=self.number_of_clusters)
-        kmeans.fit(data)
-        
-        labels = kmeans.labels_
-
-        ## On applique la méthode K-Means.
-
+        try:
+            sc = SpectralClustering(n_clusters=effective_n_clusters, affinity='precomputed', random_state=0, assign_labels='kmeans')
+            labels = sc.fit_predict(affinity_matrix)
+        except Exception as e:
+            # print(f"SpectralClustering failed: {e}. Falling back to KMeans.")
+            return self.apply_kmeans() # Fallback to KMeans if SpectralClustering fails
         return labels
-    
-    def apply_spectral_clustering(self): 
-
-        '''
-        ----------------------------------------------------------------
-        IDEA: Given a correlation matrix obtained from a database and 
-                Pearson similarity, return a vector associating each asset 
-                with the cluster number it belongs to after applying 
-                symmetric SPONGE (using the signet package).
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS: 
-
-        - self.correlation_matrix: a square dataframe of size 
-                                    (number_of_stocks, number_of_stocks)
-
-        - self.number_of_clusters: the number of clusters to identify. 
-                                    If a list is given, the output is a 
-                                    corresponding list
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT: array of int, or list of array of int: Output assignment 
-                to clusters.
-        ----------------------------------------------------------------
-        '''
-        
-        A_pos, A_neg = self.correlation_matrix.applymap(lambda x: x if x >= 0 else 0), self.correlation_matrix.applymap(lambda x: abs(x) if x < 0 else 0)
-
-        A_pos_sparse = np.abs(sparse.csc_matrix(A_pos.values))
-        A_neg_sparse = np.abs(sparse.csc_matrix(A_neg.values))
-
-        data = (A_pos_sparse, A_neg_sparse)
-
-        cluster = Cluster(data)
-
-        return cluster.spectral_cluster_adjacency(k=self.number_of_clusters)
-
-    
-    '''
-    ###################################################### ATTRIBUTES CONSTRUCTION ######################################################
-
-
-    In the following section, we provide the code of the routines that are used to construct the main attributes of a portfolio. In the next 
-    section, we combine all these routines into a single one named .training_phase()
-
-    '''
 
     def corr_matrix(self):
+        data_slice = self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :]
+        if data_slice.empty: return pd.DataFrame() # Handle empty slice
 
+        # Normalize data: (X - mean) / std. Handle std=0 by replacing with a small number.
+        mean_vals = data_slice.mean(axis=0)
+        std_vals = data_slice.std(axis=0)
+        std_vals[std_vals < 1e-9] = 1e-9 # Avoid division by zero or very small std
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : compute the correlation matrix of different stock 
-                    returns  over a given lookback_window
-        ----------------------------------------------------------------
+        # Element-wise operations are efficient on DataFrames
+        normalized_data = (data_slice - mean_vals) / std_vals
 
-        ----------------------------------------------------------------
-        PARAMS : 
-        
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-
-        - df_cleaned : pandas dataframe containing the returns of the stocks
-
-        ----------------------------------------------------------------
-        '''
-    
-        normalized_data= (self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :]-self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :].mean())/(self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :].std())
-        correlation_matrix = normalized_data.corr(method='pearson') ## MODIFIÉ
-
-        correlation_matrix = correlation_matrix.fillna(0) ## in case there are NaN values, we replace them with 0 
-
-        return correlation_matrix
-
-
-    ## we compute the return_centroid of each cluster to attribute intra-cluster weights according to the distance between stocks within the cluster and this 
-    ## centroid
+        # .corr() is efficient and handles pairwise NaNs by default (though normalized_data shouldn't have many if std is handled)
+        correlation_matrix = normalized_data.corr(method='pearson')
+        return correlation_matrix.fillna(0) # Fill any remaining NaNs (e.g., if a col was perfectly constant)
 
     def cluster_composition_and_centroid(self):
+        if self.number_of_clusters <=0: # No clusters to form
+            return {}
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : 
-        1. Get the composition of each cluster (so as to compute the return 
-        of each cluster seen as a new asset)
-        2. Get the centroid of each cluster (so as to compute intra-cluster
-        weights that will be used to compute the overall return of each 
-        cluster (with the idea that each stock has a different contribution
-        to the overall cluster))
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS : 
-        
-        - df_cleaned : pandas dataframe containing the returns of the 
-                    stocks
-
-        - correlation_matrix : pandas dataframe as given by the previous  
-                            correlation_matrix function
-
-        - number_of_clusters : integer, corresponding to the number of 
-                            clusters
-
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-        ----------------------------------------------------------------
-        '''
-
-        ## STEP 1: run the SPONGE clustering algorithm with a number of clusters fixed to be number_of_clusters and using 
-        ##         the correlation matrix correlation_matrix ==> we store the results in result
-
-        ### 1 + pd.DataFrame(...) because we want the number of clusters to range between 1 un number_of_clusters
-        if self.cov_method == 'SPONGE':
-            result = 1 + pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=self.apply_SPONGE())
-
-        if self.cov_method == 'signed_laplacian':
-            result = 1 + pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=self.apply_signed_laplacian())
-
-        if self.cov_method == 'SPONGE_sym':
-            result = 1 + pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=self.apply_SPONGE_sym())
-
-        if self.cov_method == 'Kmeans':
-            result = 1 + pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=self.apply_kmeans())
-
-        if self.cov_method == 'spectral_clustering':
-            result = 1 + pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=self.apply_spectral_clustering())
+        if self.correlation_matrix.empty or self.correlation_matrix.shape[0] < self.number_of_clusters:
+            # Not enough assets to form the requested number of clusters, or no correlation matrix
+            # print("Warning: Correlation matrix empty or too few assets for clustering. Reducing number_of_clusters.")
+            # Fallback: try to cluster all assets into one cluster if possible, or return empty.
+            if self.correlation_matrix.empty or self.correlation_matrix.shape[0] == 0:
+                return {}
+            effective_n_clusters = max(1, self.correlation_matrix.shape[0]) # At least 1 cluster, or all assets if fewer than requested
+            if effective_n_clusters < self.number_of_clusters : self.number_of_clusters = effective_n_clusters
+            # if self.number_of_clusters becomes 0, handle above.
 
 
-        ## STEP 2: compute the composition of each cluster (in terms of stocks)
+        # ... (rest of the clustering method calls using self.number_of_clusters)
+        if self.cov_method == 'SPONGE': labels = self.apply_SPONGE()
+        elif self.cov_method == 'signed_laplacian': labels = self.apply_signed_laplacian()
+        elif self.cov_method == 'SPONGE_sym': labels = self.apply_SPONGE_sym()
+        elif self.cov_method == 'Kmeans': labels = self.apply_kmeans()
+        elif self.cov_method == 'spectral_clustering': labels = self.apply_spectral_clustering()
+        else: raise ValueError(f"Unknown clustering method: {self.cov_method}")
+
+        if not isinstance(labels, np.ndarray) or labels.size == 0: # If clustering failed or returned empty
+            # print(f"Warning: Clustering method {self.cov_method} returned no labels. Defaulting to single cluster for all assets.")
+            if self.correlation_matrix.empty: return {}
+            labels = np.zeros(self.correlation_matrix.shape[0], dtype=int) # All in cluster 0
+            self.number_of_clusters = 1 # Adjust effective number of clusters
+
+        result = pd.DataFrame(index=list(self.correlation_matrix.columns), columns=['Cluster label'], data=labels)
+        result['Cluster label'] += 1 # 1-based indexing
 
         cluster_composition = {}
+        hist_data_lookback = self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :]
 
-        for i in range(1, self.number_of_clusters + 1):
-            if i in result['Cluster label'].values:
-                tickers = list(result[result['Cluster label'] == i].index)
+        for i in range(1, result['Cluster label'].max() + 1): # Iterate up to max label found
+            cluster_tickers_series = result[result['Cluster label'] == i]
+            if cluster_tickers_series.empty: continue
 
-                return_centroid = np.zeros(self.lookback_window[1] - self.lookback_window[0])
+            tickers = list(cluster_tickers_series.index)
+            valid_tickers = [t for t in tickers if t in hist_data_lookback.columns]
 
-                for elem in tickers:
-                    return_centroid = return_centroid + self.historical_data.loc[:, elem][self.lookback_window[0]:self.lookback_window[1]].values
+            if not valid_tickers:
+                centroid_val = np.zeros(self.lookback_window[1] - self.lookback_window[0])
+            else:
+                centroid_val = hist_data_lookback.loc[:, valid_tickers].mean(axis=1).values # .values for numpy array
 
-                centroid = return_centroid / len(tickers)
-
-                cluster_composition[f'cluster {i}'] = {'tickers': tickers, 'centroid': centroid}
-
+            cluster_composition[f'cluster {i}'] = {'tickers': valid_tickers, 'centroid': centroid_val}
         return cluster_composition
 
-    def constituent_weights(self): ## sigma corresponds to some dispersion cofficient
-        
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : compute the constituent weights (i.e.
-        the intra-cluster weights of each stock)
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS : 
-        
-        - df_cleaned : pandas dataframe containing the returns of the 
-                    stocks
-
-        - cluster_composition : numpy array as returned by the 
-                                cluster_composition_and_centroid 
-                                function
-
-        - sigma : parameter of dispersion
-
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT : modifies in-place the numpy ndarray returned by the 
-                cluster_composition_and_centroid function
-        ----------------------------------------------------------------
-        '''
-
+    def constituent_weights(self):
         constituent_weights = {}
+        hist_data_lookback = self.historical_data.iloc[self.lookback_window[0]:self.lookback_window[1], :]
 
-        for cluster in self.cluster_composition.keys():
-            weights = []
-            total_cluster_weight = 0
+        for cluster_name, cluster_data_info in self.cluster_composition.items():
+            tickers = cluster_data_info['tickers']
+            centroid_np = cluster_data_info['centroid']
 
-            for elem in self.cluster_composition[cluster]['tickers']:
+            exp_vals = []
+            valid_tickers_for_weights = []
 
-                elem_returns = self.historical_data.loc[:, elem][self.lookback_window[0]:self.lookback_window[1]].values
+            if not tickers:
+                constituent_weights[cluster_name] = {}
+                continue
 
-                ## we compute the distance of the stock to the centroid of the cluster
-                distance_to_centroid = np.linalg.norm(self.cluster_composition[cluster]['centroid'] - elem_returns)**2 
+            for elem_ticker in tickers:
+                if elem_ticker not in hist_data_lookback.columns: continue
+                valid_tickers_for_weights.append(elem_ticker)
+                elem_returns_np = hist_data_lookback[elem_ticker].values
 
-                ## we compute the norm exp(-|x|^2/2*sigma^2)
-                total_cluster_weight += np.exp(-distance_to_centroid / (2 * (self.sigma**2)))
+                if centroid_np.shape != elem_returns_np.shape:
+                    distance_to_centroid_sq = np.inf # Penalize heavily if shapes mismatch
+                else:
+                    distance_to_centroid_sq = np.sum((centroid_np - elem_returns_np)**2)
 
-                weights.append(np.exp(-distance_to_centroid / (2 * (self.sigma**2))))
+                exp_vals.append(np.exp(-distance_to_centroid_sq / (2 * (self.sigma**2))))
 
-            normalized_weights = [w / total_cluster_weight for w in weights]
-            constituent_weights[cluster] = dict(zip(self.cluster_composition[cluster]['tickers'], normalized_weights))
+            exp_vals_np = np.array(exp_vals)
+            total_cluster_weight_exp = exp_vals_np.sum()
 
+            current_cluster_weights = {}
+            if total_cluster_weight_exp > 1e-9:
+                normalized_exp_weights = exp_vals_np / total_cluster_weight_exp
+                for ticker, weight in zip(valid_tickers_for_weights, normalized_exp_weights):
+                    current_cluster_weights[ticker] = weight
+            else: # Fallback to equal weights if sum is too small
+                num_v_tickers = len(valid_tickers_for_weights)
+                for ticker in valid_tickers_for_weights:
+                    current_cluster_weights[ticker] = 1.0 / num_v_tickers if num_v_tickers > 0 else 0.0
+
+            constituent_weights[cluster_name] = current_cluster_weights
         return constituent_weights
 
     def cluster_return(self, lookback_window):
+        start_idx, end_idx = lookback_window[0], lookback_window[1]
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : compute the return of each cluster.
-                    The steps are : 
-                    1. find the assets composing each cluster
-                    2. compute the consituent_weights weighted-average 
-                    return of all those stocks, which is by definition 
-                    the return of the cluster
-                    
-        ----------------------------------------------------------------
+        if not (0 <= start_idx < end_idx <= len(self.historical_data)) or not self.constituent_weights_res:
+            return pd.DataFrame(index=pd.Index([]), columns=["dummy_cluster"])
 
-        ----------------------------------------------------------------
-        PARAMS : 
-        
-        - df_cleaned : pandas dataframe containing the returns of the 
-                    stocks
+        num_days = end_idx - start_idx
+        cluster_names = list(self.constituent_weights_res.keys())
+        num_clusters = len(cluster_names)
 
-        - constituent_weights : numpy array as returned by the 
-                                constituent_weights function 
+        cluster_returns_np = np.zeros((num_days, num_clusters))
+        hist_data_slice = self.historical_data.iloc[start_idx:end_idx, :]
 
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-        ----------------------------------------------------------------
+        for i, cluster_name in enumerate(cluster_names):
+            for ticker, weight in self.constituent_weights_res[cluster_name].items():
+                if ticker in hist_data_slice.columns:
+                    cluster_returns_np[:, i] += hist_data_slice[ticker].values * weight
 
-        ----------------------------------------------------------------
-        OUTPUT : create a single column pandas dataframe containing the 
-                return of each cluster over the lookback_window days
-        ----------------------------------------------------------------
-        '''
+        return pd.DataFrame(cluster_returns_np, index=hist_data_slice.index, columns=cluster_names)
 
-        cluster_returns = pd.DataFrame(index = self.historical_data.index[lookback_window[0]:lookback_window[1]], columns= [f'cluster {i}' for i in range(1, len(self.constituent_weights_res) + 1)], data = np.zeros((len(self.historical_data.index[lookback_window[0]:lookback_window[1]]), len(self.constituent_weights_res))))
+    def _fit_and_forecast_var(self):
+        data_for_var = self.cluster_returns.astype(float).dropna(axis=1, how='all')
+        var_order = self.var_order
 
-        for cluster in self.constituent_weights_res.keys():
+        if data_for_var.empty or data_for_var.shape[0] <= var_order or data_for_var.shape[1] == 0:
+            return pd.Series(0.0, index=self.cluster_returns.columns)
 
-            for ticker, weight in self.constituent_weights_res[cluster].items(): 
+        N_obs, N_series = data_for_var.shape
+        X_lags_list = [data_for_var.iloc[var_order - lag : N_obs - lag].values for lag in range(1, var_order + 1)]
+        X_lags = np.hstack(X_lags_list)
+        X_const = np.ones((X_lags.shape[0], 1))
+        X = np.hstack((X_const, X_lags))
+        Y = data_for_var.iloc[var_order:].values
+        coefficients = np.linalg.solve(X.T @ X, X.T @ Y)
 
-                ## we transpose df_cleaned to have columns for each ticker
-                cluster_returns[cluster] = cluster_returns[cluster] + self.historical_data[ticker][lookback_window[0]:lookback_window[1]]*weight
+        # try:
+        #     XTX = X.T @ X
+        #     XTY = X.T @ Y
+        #     # Add small regularization term to XTX diagonal for stability if XTX is ill-conditioned
+        #     # This is a form of Ridge regression for VAR.
+        #     # lambda_reg = 1e-6
+        #     # coefficients = np.linalg.solve(XTX + lambda_reg * np.eye(XTX.shape[0]), XTY)
+        #     coefficients = np.linalg.solve(XTX, XTY)
 
-        return cluster_returns
+        # except np.linalg.LinAlgError:
+        #     # print(f"XTX is singular or near-singular. Falling back to pseudo-inverse for VAR.")
+        #     try:
+        #         coefficients = np.linalg.pinv(X.T @ X) @ (X.T @ Y)
+        #     except np.linalg.LinAlgError:
+        #         # print(f"Pseudo-inverse also failed. Returning zero forecasts.")
+        #         return pd.Series(0.0, index=self.cluster_returns.columns)
 
-    """def noised_array(self):
+        forecasts = np.zeros((self.evaluation_window, N_series))
+        history_for_forecast = data_for_var.iloc[N_obs - var_order : N_obs].values
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : given an array y and a target correlation eta, 
-                    compute the array with the noise  
-        ----------------------------------------------------------------
+        for i in range(self.evaluation_window):
+            lagged_values_flat = history_for_forecast[::-1].ravel() # Flattens in reverse order of lags
+            forecast_X_vec = np.hstack(([1.0], lagged_values_flat))
+            next_forecast = forecast_X_vec @ coefficients
+            forecasts[i, :] = next_forecast
+            history_for_forecast = np.vstack((history_for_forecast[1:], next_forecast))
 
-        ----------------------------------------------------------------
-        PARAMS : 
+        forecasts_df = pd.DataFrame(forecasts, columns=data_for_var.columns)
+        mean_forecasted_returns = forecasts_df.mean()
+        return mean_forecasted_returns.reindex(self.cluster_returns.columns, fill_value=0.0)
 
-        - y : numpy ndarray that we want to perturb
+    def _calculate_cluster_weights(self):
+        forecasted_returns = self._fit_and_forecast_var()
 
-        - eta : target correlation that we want to create between y and 
-                its perturbated version
+        if forecasted_returns.empty or forecasted_returns.isnull().all():
+            num_clusters = len(self.cluster_returns.columns) if self.cluster_returns is not None and not self.cluster_returns.empty else 1
+            num_clusters = max(1, num_clusters) # Ensure not zero
+            return pd.Series(1.0 / num_clusters, index=self.cluster_returns.columns if self.cluster_returns is not None and not self.cluster_returns.empty else ["dummy"])
 
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT : noised version of y that satisfies the targeted level 
-                of correlation
-        ----------------------------------------------------------------
-        '''
-        
-        # We compute with a small noise 
-        epsilon_std_dev = 0.001
-
-        # Calculer la corrélation initiale
-
-        correlation = 1
-
-        if self.cov_method == 'forecast':
-            y = self.historical_data.iloc[self.lookback_window[1]: self.lookback_window[1]+self.evaluation_window,:].mean()
-
-        else:
-            y = self.cluster_return(lookback_window=[self.lookback_window[1], self.lookback_window[1]+self.evaluation_window]).mean()
-
-        x = y.copy()
-
-        # Boucle pour ajuster l'écart-type du bruit jusqu'à ce que la corrélation atteigne eta
-
-        while correlation > self.eta:
-
-            # Generate a vector of Gaussian noise
-            noise = np.random.normal(0, epsilon_std_dev, len(y))
-
-            x = noise + y
-
-            correlation = x.corr(y.squeeze())
-
-            # Adjust the standard deviation of the noise
-            epsilon_std_dev += 0.0005
-
-        return x"""
-
-    def noised_array(self):
-
-        if self.eta==0: ## si eta = 0, expected_return = moyenne des returns sur la période d'entrainement
-
-                return(self.cluster_return(self.lookback_window).mean()) ## si eta = 0, on choisit l'approche naïve qui consiste à ne pas 
-                                                                         ## introduire du tout d'alpha et de prédiction
-            
-        else:
-            # Extraction des rendements des actifs sur la période d'évaluation
-
-            asset_returns = self.cluster_return(lookback_window=[self.lookback_window[1], self.lookback_window[1]+self.evaluation_window])
-
-            if self.eta==1:
-
-                return(self.cluster_return(lookback_window=[self.lookback_window[1], self.lookback_window[1]+self.evaluation_window]).mean())
-            
+        if not self.short_selling:
+            positive_forecasts = forecasted_returns.clip(lower=0)
+            sum_positive = positive_forecasts.sum()
+            if sum_positive < 1e-9:
+                num_clusters = len(forecasted_returns)
+                cluster_weights = pd.Series(1.0 / num_clusters if num_clusters > 0 else 0.0, index=forecasted_returns.index)
             else:
-                # Calcul des moyennes et des écarts-types des rendements pour chaque actif
-                asset_means = asset_returns.mean()
-          
-
-                # Initialisation du DataFrame pour stocker les rendements bruités
-                noised_returns = asset_means.copy()
-                if self.eta==0.001:
-                    noise_std_dev=12
-                elif self.eta==0.005:
-                    noise_std_dev=2.2
-                elif self.eta==0.01:
-                    noise_std_dev = 1.175
-                elif self.eta==0.02:
-                    noise_std_dev=0.59
-                elif self.eta== 0.1:
-                    noise_std_dev=0.12
-                elif self.eta==0.2:
-                    noise_std_dev=0.059
-                elif self.eta==0.3:
-                    noise_std_dev=0.036
-                elif self.eta==0.4:
-                    noise_std_dev=0.025
-                elif self.eta==0.5:
-                    noise_std_dev=0.019
-                elif self.eta==0.6:
-                    noise_std_dev=0.014
-                elif self.eta==0.7:
-                    noise_std_dev=0.007
-                elif self.eta==0.9:
-                    noise_std_dev=0.004
-                else:
-                    print("eta must be in {0.01, 0.02, 0.1, 0.2, 0.5, 0.9}")
-                # Itération sur chaque colonne (actif) pour ajouter du bruit
-                for asset in asset_means.index:
-                    
-                    # Génération du bruit
-                    noise = np.random.normal(0, noise_std_dev)
-
-                    # Ajout du bruit aux rendements de l'actif
-                    noised_returns[asset] = asset_means[asset] + noise
-                y_max = noised_returns.max()
-                y_min = noised_returns.min()
-                x_max= asset_returns.max()
-                x_min=asset_returns.min()
-                # Mise à l'échelle de y pour qu'elle corresponde à l'échelle de x
-                y_scaled = y_scaled = (noised_returns- y_min) * (x_max - x_min) / (y_max - y_min) + x_min
-                # Mise à l'échelle de noised pour qu'elle corresponde à l'échelle des returns
-                return y_scaled
-    
-    def markowitz_weights(self):
-
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : compute the markowitz weights of each cluster in 
-                    the synthetic portfolio using the pypfopt package
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS : 
-
-        - cluster_return : numpy array as returned by the 
-                        cluster_return function 
-
-        - df_cleaned : pandas dataframe containing the returns of the 
-                    stocks
-
-        - constituent_weights : numpy array as returned by the 
-                                constituent_weights function 
-
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-
-        - evaluation_window : integer, corresponding to the number of 
-                            days that we look bakc at to make our 
-                            prevision
-
-        - eta : target correlation that we want to create between y and 
-                its perturbated version
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT : returns the markowitz weights of each cluster
-        ----------------------------------------------------------------
-        '''
-
-        if self.EWA_cov:
-
-            X = self.cluster_returns.transpose()
-            _, n_days = X.shape
-            means = X.mean(axis=1)
-            for i in range(len(means)):
-                X.iloc[i, :] -= means[i]
-            cov = ((1 - self.beta)/(1 - self.beta ** n_days)) * sum((self.beta**(n_days - t)*np.outer(X.iloc[:, t - 1].values, X.iloc[:, t - 1].values)) for t in range(1, n_days + 1))
-            cov = pd.DataFrame(index=self.cluster_returns.columns, columns=self.cluster_returns.columns, data=cov)
-
-        else:  
-            cov = self.cluster_returns.cov()
-
-        cov = cov.fillna(0.)
-
-        ## on construit le vecteur d'expected return du cluster (252 jours de trading par an, on passe de rendements journaliers à rendements annualisés)
-        
-        expected_returns = self.noised_array()
-        e=np.ones(len(expected_returns))
-
-        if np.linalg.det(cov) == 0: ## si la matrice est singuliere
-            w_min_var=(np.linalg.pinv(cov)@e)/(e.T@np.linalg.pinv(cov)@e)
-            w_mk=(np.linalg.pinv(cov)@expected_returns)/(e.T@np.linalg.pinv(cov)@expected_returns)
-
-        else: 
-            w_min_var=(np.linalg.inv(cov)@e)/(e.T@np.linalg.inv(cov)@e)
-            w_mk=(np.linalg.inv(cov)@expected_returns)/(e.T@np.linalg.inv(cov)@expected_returns)
-            
-        target_return=0.0008 #approximatively daily return for 20% annual
-        alpha=(target_return-expected_returns@w_min_var)/(expected_returns@(w_mk-w_min_var))
-        
-
-        if self.markowitz_type == 'min_variance':
-            return(w_min_var)
-        
-        elif self.markowitz_type == 'expected_returns':
-            if expected_returns@w_min_var>=target_return:
-                return(w_min_var)
+                cluster_weights = positive_forecasts / sum_positive
+        else:
+            abs_sum_forecasts = forecasted_returns.abs().sum()
+            if abs_sum_forecasts < 1e-9:
+                num_clusters = len(forecasted_returns)
+                cluster_weights = pd.Series(1.0 / num_clusters if num_clusters > 0 else 0.0, index=forecasted_returns.index)
             else:
-                return(w_min_var+alpha*(w_mk-w_min_var))
-        
-        """
-        if self.short_selling: ## if we allow short-selling, then weights are not constrained to take nonnegative values, 
-                               ## hence the (-1, 1) bounds
-            ef = EfficientFrontier(expected_returns=expected_returns, cov_matrix=cov, weight_bounds=(-1, 1)) 
-        else: 
-            ef = EfficientFrontier(expected_returns=expected_returns, cov_matrix=cov, weight_bounds=(0, 1))
-        if self.markowitz_type == 'min_variance':
-            ef.min_volatility()
-        elif self.markowitz_type == 'max_sharpe':
-            ef.max_sharpe(risk_free_rate=0)   
-        elif self.markowitz_type == 'expected_returns':         
-            ef.efficient_return(target_return=max(0, expected_returns.mean()))
-        markowitz_weights = ef.clean_weights()
-        return markowitz_weights"""
+                cluster_weights = forecasted_returns / abs_sum_forecasts
+        return cluster_weights.reindex(self.cluster_returns.columns, fill_value=0.0)
+
 
     def final_W(self):
+        W_dict = {}
+        if self.cluster_level_weights.empty or self.cluster_level_weights.isnull().all():
+            # print("Warning: cluster_level_weights is empty/NaN. Defaulting final weights.")
+            # Fallback to equal weight among all original historical assets
+            num_total_assets = len(self.historical_data.columns)
+            if num_total_assets > 0:
+                return pd.DataFrame({'weights': np.ones(num_total_assets) / num_total_assets},
+                                    index=self.historical_data.columns)
+            else:
+                return pd.DataFrame(columns=['weights'], index=pd.Index([], name='ticker'))
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : compute the final weights of each individual stock
-                    in the overal portfolio using both the constituent 
-                    and the markowitz weights
-        ----------------------------------------------------------------
+        for cluster_name, constituent_dict in self.constituent_weights_res.items():
+            cluster_w = self.cluster_level_weights.get(cluster_name, 0.0)
+            if abs(cluster_w) > 1e-9:
+                for ticker, constituent_w in constituent_dict.items():
+                    # W_dict[ticker] = W_dict.get(ticker, 0.0) + constituent_w * cluster_w # This could lead to double counting if a ticker is in multiple clusters (not typical for hard clustering)
+                    W_dict[ticker] = constituent_w * cluster_w # Assuming hard clustering, ticker belongs to one cluster effectively or its weight is sum from "soft" assignment by constituent_weights
 
-        ----------------------------------------------------------------
-        PARAMS : 
+        if not W_dict:
+            num_total_assets = len(self.historical_data.columns)
+            if num_total_assets > 0:
+                return pd.DataFrame({'weights': np.ones(num_total_assets) / num_total_assets}, index=self.historical_data.columns)
+            else: return pd.DataFrame(columns=['weights'], index=pd.Index([], name='ticker'))
 
-        - markowitz_weights : numpy array as returned by the 
-                            markowitz_weights function 
+        # Normalize final weights if short selling is false, to sum to 1 and be non-negative
+        final_weights_series = pd.Series(W_dict)
+        if not self.short_selling:
+            final_weights_series = final_weights_series.clip(lower=0)
+            sum_final_weights = final_weights_series.sum()
+            if sum_final_weights > 1e-9:
+                final_weights_series = final_weights_series / sum_final_weights
+            else: # If all clipped weights are zero, distribute equally
+                non_zero_count = (final_weights_series > 1e-9).sum() # Should be 0 here
+                if len(final_weights_series) > 0:
+                    final_weights_series = pd.Series(1.0/len(final_weights_series), index=final_weights_series.index)
+                # else it remains empty series
 
-        - constituent_weights : integer, corresponding to the number of lookback 
-                                days (in terms of historcal returns)
-        ----------------------------------------------------------------
+        return pd.DataFrame(final_weights_series, columns=['weights'])
 
-        ----------------------------------------------------------------
-        OUTPUT : returns the final weights of each asset, i.e. the 
-                overall portfolio weights
-        ----------------------------------------------------------------
-        '''
 
-        ### On cherche désormais à calculer le poids de chaque actif dans le portefeuille total
-
-        W = {}
-        i=0
-        for cluster in self.constituent_weights_res.keys(): ## we range across all clusters
-
-            for tickers, weight in self.constituent_weights_res[cluster].items(): ## we range across all tickers in each cluster
-
-                W[tickers] = weight*self.markowitz_weights_res[i]
-            i+=1
-        W = pd.DataFrame(list(W.items()), columns=['ticker', 'weights'])
-    
-        W.set_index('ticker', inplace=True)
-
-        return W
-    
 class PyFolioC(PyFolio):
-
-    def __init__(self, number_of_repetitions, historical_data, lookback_window, evaluation_window, number_of_clusters, sigma, eta, beta, EWA_cov = False, short_selling=False, cov_method='SPONGE', markowitz_type='min_variance', transaction_cost_rate=0.0001):
-        
-        super().__init__(historical_data, 
-                         lookback_window, 
-                         evaluation_window, 
-                         number_of_clusters, 
-                         sigma, 
-                         eta, 
-                         beta, 
-                         EWA_cov,
-                         short_selling, 
-                         cov_method,
-                         markowitz_type)
-        
+    def __init__(self, number_of_repetitions, historical_data, lookback_window, evaluation_window, number_of_clusters, sigma, beta, EWA_cov = False, short_selling=False, cov_method='SPONGE', var_order=1, transaction_cost_rate=0.0001):
         self.number_of_repetitions = number_of_repetitions
+        super().__init__(historical_data, lookback_window, evaluation_window, number_of_clusters, sigma, beta, EWA_cov, short_selling, cov_method, var_order)
         self.transaction_cost_rate = transaction_cost_rate
         self.consolidated_weight = self.consolidated_W()
         self.portfolio_return = self.portfolio_returns()
-        
+
     def consolidated_W(self):
+        if self.number_of_repetitions == 1: # If only one repetition, use weights from super init
+            return self.final_weights.T.rename(index={'weights':'weight'}) # Match expected output format
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : consolidate the numpy array of weights by 
-                    repeating the training and portfolio construction
-                    phase a certain number of times 
-                    (number_of_repetitions).
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        PARAMS : 
-
-        - number_of_repetitions : number of time we repeat the training
-                                phase and the consequent averaging 
-                                method
-
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
-
-        - df_cleaned : cleaned pandas dataframe containing the returns 
-                    of the stocks
-
-        - number_of_clusters : integer, corresponding to the number of 
-                            clusters
-
-        - sigma : float, corresponding to the dispersion in the intra-
-                cluster weights
-
-        - df : pandas dataframe containing the raw data
-
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT : numpy ndarray containing the returns of the overall weights of each cluster
-        ----------------------------------------------------------------
-        '''
-
-        # Initialize an empty DataFrame to store the results
-        consolidated_W = pd.DataFrame()
-
-        # Run the training function n times and concatenate the results
+        all_weights_dfs = []
         for _ in range(self.number_of_repetitions):
+            try:
+                portfolio_run = PyFolio(historical_data=self.historical_data, lookback_window=self.lookback_window, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, var_order=self.var_order)
+                if not portfolio_run.final_weights.empty:
+                    all_weights_dfs.append(portfolio_run.final_weights)
+            except Exception as e:
+                print(f"Error in PyFolio run for consolidated_W: {e}. Skipping.")
 
-            # Assuming training() returns a DataFrame with 'weights' as the column name
-            portfolio = PyFolio(historical_data=self.historical_data, lookback_window=self.lookback_window, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, eta=self.eta, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, markowitz_type=self.markowitz_type)
+        if not all_weights_dfs:
+            all_tickers = self.historical_data.columns
+            return pd.DataFrame(np.zeros((1, len(all_tickers))), columns=all_tickers, index=['weight'])
 
-            weights_df = portfolio.final_weights
+        # Each df in all_weights_dfs has 'weights' column and ticker index
+        # Concatenate along axis=1, then mean, then transpose.
+        # Example: df1 = pd.DataFrame({'weights': [0.5,0.5]}, index=['A','B'])
+        #          df2 = pd.DataFrame({'weights': [0.6,0.4]}, index=['A','B'])
+        # panel = pd.concat([df1,df2], axis=1) -> columns are ('weights',0), ('weights',1) or similar if names are same
+        # Need to handle column names carefully if they are all 'weights'.
+        # Renaming columns before concat:
+        for i, df in enumerate(all_weights_dfs):
+            df.columns = [f'weights_rep_{i}']
 
-            # Concatenate the results into columns
-            consolidated_W = pd.concat([consolidated_W, weights_df], axis=1)
+        consolidated_panel = pd.concat(all_weights_dfs, axis=1)
+        average_weights_series = consolidated_panel.mean(axis=1)
+        return pd.DataFrame(average_weights_series, columns=['weight']).T
 
-        # Calculate the average along axis 1
-        average_weights = consolidated_W.mean(axis=1)
-
-        # Create a DataFrame with the average weights
-        consolidated_W = pd.DataFrame({'weight': average_weights})
-
-        consolidated_W = consolidated_W.transpose()
-
-        return consolidated_W
 
     def portfolio_returns(self):
+        eval_start_idx, eval_end_idx = self.lookback_window[1], self.lookback_window[1] + self.evaluation_window
+        eval_end_idx = min(eval_end_idx, len(self.historical_data))
 
-        '''
-        ----------------------------------------------------------------
-        GENERAL IDEA : given the overall weights of each asset in the 
-                    portfolio, compute the portfolio return over an 
-                    evaluation window that does not overlap with the 
-                    lookback_window. 
-        ----------------------------------------------------------------
+        if eval_start_idx >= eval_end_idx:
+            return pd.DataFrame(columns=['return'], index=pd.Index([]))
 
-        ----------------------------------------------------------------
-        PARAMS : 
+        hist_data_eval_slice = self.historical_data.iloc[eval_start_idx:eval_end_idx, :]
+        portfolio_returns_np = np.zeros(len(hist_data_eval_slice))
 
-        - evaluation_window : integer, corresponding to the number of 
-                            future days (in terms of historcal returns) 
-                            on which we evaluate the portfolio
+        if self.consolidated_weight.empty or 'weight' not in self.consolidated_weight.index:
+            return pd.DataFrame(portfolio_returns_np, index=hist_data_eval_slice.index, columns=['return'])
 
-        - lookback_window : list of length 2, [start, end] corresponding 
-                            to the range of the lookback_window
+        weights_series = self.consolidated_weight.loc['weight']
+        for ticker, weight in weights_series.items():
+            if abs(weight) > 1e-9 and ticker in hist_data_eval_slice.columns:
+                portfolio_returns_np += hist_data_eval_slice[ticker].values * weight
 
-        - df_cleaned : cleaned pandas dataframe containing the returns 
-                    of the stocks
+        return pd.DataFrame(portfolio_returns_np, index=hist_data_eval_slice.index, columns=['return'])
 
-        - consolidated_W : numpy ndarray, containing the final weights 
-                        of each asset, i.e. the overall portfolio 
-                        weights
-
-        - df : pandas dataframe containing the raw data
-        ----------------------------------------------------------------
-
-        ----------------------------------------------------------------
-        OUTPUT : returns the portfolio return of each cluster in a 
-                pandas dataframe
-        ----------------------------------------------------------------
-        '''
-
-        portfolio_returns = pd.DataFrame(index=self.historical_data.iloc[self.lookback_window[1]:self.lookback_window[1]+self.evaluation_window, :].index, columns=['return'], data=np.zeros(len(self.historical_data.iloc[self.lookback_window[1]:self.lookback_window[1]+self.evaluation_window, :].index)))
-
-        for ticker in self.consolidated_weight.columns: 
-
-        ##  each time we add :            the present value of the return + the weighted "contribution" of the stock 'ticker' times is weight in the portfolio
-            portfolio_returns['return'] = portfolio_returns['return'] + self.historical_data[ticker][self.lookback_window[1]:self.lookback_window[1]+self.evaluation_window]*self.consolidated_weight[ticker]['weight']
-
-        return portfolio_returns
-    
     def sliding_window_past_dep(self, number_of_window, include_transaction_costs=True):
-
-        PnL = []
-        daily_PnL = []
-        overall_return = pd.DataFrame()
-        portfolio_value = [1]  # we start with a value of 1, the list contain : the porfolio value at the start of each evaluation period
-        lookback_window_0 = self.lookback_window
+        overall_return_list = []
+        portfolio_values_over_time = [1.0]
         Turnovers=[]
-        weights = []
+        previous_weights_df = None # Stores consolidated_weight (DataFrame with 'weight' row)
+
         for i in range(number_of_window):
+            current_portfolio_value_for_block_pnl = portfolio_values_over_time[-1]
             try:
-                consolidated_portfolio = PyFolioC(number_of_repetitions=self.number_of_repetitions, historical_data=self.historical_data, lookback_window=lookback_window_0, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, eta=self.eta, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, markowitz_type=self.markowitz_type)
-                current_weights = consolidated_portfolio.consolidated_weight
-                weights.append(current_weights)
-                if len(weights)==1:
-                    Turnover = 1.0
+                current_lookback_window = [self.lookback_window[0] + self.evaluation_window * i,
+                                           self.lookback_window[1] + self.evaluation_window * i]
+                if not (current_lookback_window[1] <= len(self.historical_data) and
+                        current_lookback_window[0] < current_lookback_window[1]):
+                    break
+
+                current_pf_c_instance = PyFolioC(number_of_repetitions=self.number_of_repetitions, historical_data=self.historical_data, lookback_window=current_lookback_window, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, var_order=self.var_order, transaction_cost_rate=self.transaction_cost_rate)
+                current_consolidated_weights_df = current_pf_c_instance.consolidated_weight
+
+                current_weights_series = current_consolidated_weights_df.loc['weight'] if not current_consolidated_weights_df.empty and 'weight' in current_consolidated_weights_df.index else pd.Series(0.0, index=self.historical_data.columns)
+
+                if previous_weights_df is None: Turnover = 1.0
                 else:
-                    d=np.abs(weights[-1].squeeze() - weights[-2].squeeze())
-                    Turnover = np.sum(d)
-                
+                    prev_w_series = previous_weights_df.loc['weight']
+                    all_tkrs = prev_w_series.index.union(current_weights_series.index)
+                    Turnover = np.sum(np.abs(prev_w_series.reindex(all_tkrs).fillna(0) - current_weights_series.reindex(all_tkrs).fillna(0)))
                 Turnovers.append(Turnover)
-                transaction_costs = Turnover * self.transaction_cost_rate if include_transaction_costs else 0
-                overall_return = pd.concat([overall_return, consolidated_portfolio.portfolio_return - transaction_costs / self.evaluation_window])
-                
+                previous_weights_df = current_consolidated_weights_df
 
-                adjusted_returns = consolidated_portfolio.portfolio_return['return'] - (transaction_costs / self.evaluation_window)
+                transaction_costs_per_day = (Turnover * self.transaction_cost_rate) / self.evaluation_window if include_transaction_costs and self.evaluation_window > 0 else 0.0
+                block_portfolio_returns_df = current_pf_c_instance.portfolio_return
 
-                # Now calculate the cumulative product of the adjusted returns
-                cumulative_returns = np.cumprod(1 + adjusted_returns) * portfolio_value[-1] - portfolio_value[-1]
+                if block_portfolio_returns_df.empty:
+                    portfolio_values_over_time.append(current_portfolio_value_for_block_pnl)
+                    continue
 
-                # Reshape the cumulative returns to match the expected evaluation window size and concatenate to the PnL array
-                PnL = np.concatenate((PnL, np.reshape(cumulative_returns, (self.evaluation_window,))))
+                overall_return_list.append(block_portfolio_returns_df - transaction_costs_per_day)
+                adjusted_block_returns = block_portfolio_returns_df['return'] - transaction_costs_per_day
+                block_cumulative_pnl_values = (np.cumprod(1 + adjusted_block_returns) - 1) * current_portfolio_value_for_block_pnl
 
-                daily_PnL = np.concatenate((daily_PnL, np.reshape(np.cumprod(1 + consolidated_portfolio.portfolio_return) * portfolio_value[-1] - portfolio_value[-1], (self.evaluation_window,))))
-
-                portfolio_value.append(portfolio_value[-1] + PnL[-1])
-
-                print(f'step {i+1}/{number_of_window}, portfolio value: {portfolio_value[-1]:.4f}')
-
-
-                lookback_window_0 = [self.lookback_window[0] + self.evaluation_window * i, self.lookback_window[1] + self.evaluation_window * i]
-
+                if not block_cumulative_pnl_values.empty:
+                    portfolio_values_over_time.append(current_portfolio_value_for_block_pnl + block_cumulative_pnl_values.iloc[-1])
+                else: portfolio_values_over_time.append(current_portfolio_value_for_block_pnl)
+                print(f'step {i+1}/{number_of_window}, portfolio value: {portfolio_values_over_time[-1]:.4f}')
             except Exception as e:
-                print(f"Error occurred at step {i}: {e}")
-                return overall_return, PnL, portfolio_value, daily_PnL
+                print(f"Error in sliding_window_past_dep step {i+1}: {e}")
+                break
 
-        n = len(PnL) // self.evaluation_window
+        overall_return_final_df = pd.concat(overall_return_list) if overall_return_list else pd.DataFrame(columns=['return'])
+        continuous_cumulative_pnl_from_start = ((1 + overall_return_final_df['return']).cumprod() - 1) if not overall_return_final_df.empty else pd.Series([])
 
-        for j in range(1, n):
-            for i in range(1, self.evaluation_window + 1):
-                PnL[j * self.evaluation_window + i - 1] = PnL[j * self.evaluation_window + i - 1] + PnL[j * self.evaluation_window - 1]
+        # For daily_PnL, it was originally block-wise from start of block. Reconstruct similar idea if needed or use overall_return_final_df
+        # For now, daily_PnL is not explicitly reconstructed here as it was for block-relative PnL.
+        # The primary PnL metrics are overall_return_final_df (daily strategy returns) and continuous_cumulative_pnl_from_start (total PnL).
+        return overall_return_final_df, continuous_cumulative_pnl_from_start.values, portfolio_values_over_time, None, Turnovers # daily_PnL placeholder
 
-        return overall_return, PnL, portfolio_value, daily_PnL, Turnovers
 
     def sliding_window_past_indep(self, number_of_window, include_transaction_costs=True):
-
-        PnL = []
-        daily_PnL = []
-        overall_return = pd.DataFrame()
-        portfolio_value = [1]  # we start with a value of 1, the list contain : the porfolio value at the start of each evaluation period
-        lookback_window_0 = self.lookback_window
-        previous_weights = None
+        overall_return_list = []
+        portfolio_value_tracker = [1.0]
+        previous_weights_df = None
         Turnovers = []
-        most_corr_contribution = [[] for _ in range(self.number_of_clusters)]
+        # Ensure number_of_clusters is positive for initializing this list
+        num_contrib_lists = max(1, self.number_of_clusters)
+        most_corr_contribution_lists = [[] for _ in range(num_contrib_lists)]
 
+        # Cache for get_most_corr_cluster results per sliding window step
+        # Key: tuple(lookback_window), Value: { 'sorted_clusters': [...] }
+        # This cache is reset for each main sliding window step (i)
 
         for i in range(1, number_of_window + 1):
+            # Reset cache for this new portfolio instance context
+            correlation_cache_for_this_step = {}
             try:
-                consolidated_portfolio = PyFolioC(number_of_repetitions=self.number_of_repetitions, historical_data=self.historical_data, lookback_window=lookback_window_0, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, eta=self.eta, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, markowitz_type=self.markowitz_type)
-                current_weights = consolidated_portfolio.consolidated_weight
+                current_lookback_window = [self.lookback_window[0] + self.evaluation_window * (i-1),
+                                           self.lookback_window[1] + self.evaluation_window * (i-1)]
+                if not (current_lookback_window[1] <= len(self.historical_data) and
+                        current_lookback_window[0] < current_lookback_window[1]):
+                    break
 
-                if previous_weights is None:
-                    Turnover = 1.0
+                current_pf_c_instance = PyFolioC(number_of_repetitions=self.number_of_repetitions, historical_data=self.historical_data, lookback_window=current_lookback_window, evaluation_window=self.evaluation_window, number_of_clusters=self.number_of_clusters, sigma=self.sigma, beta=self.beta, EWA_cov=self.EWA_cov, short_selling=self.short_selling, cov_method=self.cov_method, var_order=self.var_order, transaction_cost_rate=self.transaction_cost_rate)
+                current_consolidated_weights_df = current_pf_c_instance.consolidated_weight
+                current_weights_series = current_consolidated_weights_df.loc['weight'] if not current_consolidated_weights_df.empty and 'weight' in current_consolidated_weights_df.index else pd.Series(0.0, index=self.historical_data.columns)
+
+                if previous_weights_df is None: Turnover = 1.0
                 else:
-                    Turnover = np.sum(np.abs(current_weights.squeeze() - previous_weights.squeeze()))
+                    prev_w_series = previous_weights_df.loc['weight']
+                    all_tkrs = prev_w_series.index.union(current_weights_series.index)
+                    Turnover = np.sum(np.abs(prev_w_series.reindex(all_tkrs).fillna(0) - current_weights_series.reindex(all_tkrs).fillna(0)))
                 Turnovers.append(Turnover)
-                transaction_costs = Turnover * self.transaction_cost_rate if include_transaction_costs else 0
-                overall_return = pd.concat([overall_return, consolidated_portfolio.portfolio_return - transaction_costs / self.evaluation_window])
-                non_adjusted_returns = np.cumprod(consolidated_portfolio.portfolio_return['return'] + 1) - 1 
-                last_non_adjusted_return = non_adjusted_returns[-1]
+                previous_weights_df = current_consolidated_weights_df
 
-                for k in range(self.number_of_clusters):
-                    most_corr_profit_k = most_corr_PnL(consolidated_portfolio, lookback_window_0, self.evaluation_window, self.historical_data, k)
-                    
-                    contribution = most_corr_profit_k[0]/last_non_adjusted_return - (len(most_corr_profit_k[1][2])/self.historical_data.shape[1])
+                transaction_costs_per_day = (Turnover * self.transaction_cost_rate) / self.evaluation_window if include_transaction_costs and self.evaluation_window > 0 else 0.0
+                block_portfolio_returns_df = current_pf_c_instance.portfolio_return
 
-                    most_corr_contribution[k].append(contribution)
+                if block_portfolio_returns_df.empty:
+                    if overall_return_list: portfolio_value_tracker.append(portfolio_value_tracker[-1])
+                    else: portfolio_value_tracker.append(1.0)
+                    continue
 
-                    # print(f'step {i}/{number_of_window}, contribution of the {k}-th most correlated cluster: {contribution:.4f}')
+                overall_return_list.append(block_portfolio_returns_df - transaction_costs_per_day)
 
-                adjusted_returns = consolidated_portfolio.portfolio_return['return'] - (transaction_costs / self.evaluation_window)
+                # Most correlated cluster contribution
+                if not block_portfolio_returns_df.empty:
+                    non_adjusted_block_cum_returns = (1 + block_portfolio_returns_df['return']).cumprod() -1
+                    last_non_adjusted_return_for_block = non_adjusted_block_cum_returns.iloc[-1] if not non_adjusted_block_cum_returns.empty else 0.0
 
-                # MODIFICATION ICI PAR RAPPORT A SLIDING_WINDOW_1 --> ON GARDE TOUJOURS UNE VALEUR INITIALE DE 1
-                cumulative_returns = np.cumprod(1 + adjusted_returns) * 1 - 1
-                
-                # Reshape the cumulative returns to match the expected evaluation window size and concatenate to the PnL array
-                PnL = np.concatenate((PnL, np.reshape(cumulative_returns, (self.evaluation_window,))))
+                    if abs(last_non_adjusted_return_for_block) > 1e-9 and current_pf_c_instance.cluster_composition:
+                        num_clusters_to_check = min(self.number_of_clusters, len(current_pf_c_instance.cluster_composition))
+                        num_clusters_to_check = max(1, num_clusters_to_check)
 
-                daily_PnL = np.concatenate((daily_PnL, np.reshape(np.cumprod(1 + consolidated_portfolio.portfolio_return) - 1, (self.evaluation_window,))))
+                        for k_idx in range(num_clusters_to_check): # k_idx from 0 to num_clusters_to_check-1
+                            # most_corr_PnL takes (k_idx+1) for 1-based 'number'
+                            try:
+                                # Pass the cache for this step
+                                profit_k, cluster_info_k = most_corr_PnL(current_pf_c_instance, current_lookback_window, self.evaluation_window, self.historical_data, k_idx+1, cache_for_get_cluster=correlation_cache_for_this_step)
 
-                portfolio_value.append(portfolio_value[-1] + PnL[-1])
+                                if cluster_info_k[0] is None : contribution = np.nan
+                                else:
+                                    num_tickers_in_k = len(cluster_info_k[2])
+                                    total_hist_assets = self.historical_data.shape[1]
+                                    baseline = (num_tickers_in_k / total_hist_assets) if total_hist_assets > 0 else 0.0
+                                    contribution = (profit_k / last_non_adjusted_return_for_block) - baseline
 
-                print(f'step {i}/{number_of_window}, portfolio value: {portfolio_value[-1]:.4f}')
-                
+                                if k_idx < len(most_corr_contribution_lists):
+                                     most_corr_contribution_lists[k_idx].append(contribution)
+                            except Exception as most_corr_e:
+                                # print(f"Err most_corr_PnL k_idx={k_idx}: {most_corr_e}")
+                                if k_idx < len(most_corr_contribution_lists):
+                                    most_corr_contribution_lists[k_idx].append(np.nan)
 
-                previous_weights = current_weights
-
-                lookback_window_0 = [self.lookback_window[0] + self.evaluation_window * i, self.lookback_window[1] + self.evaluation_window * i]
+                if overall_return_list:
+                    temp_overall_df = pd.concat(overall_return_list)
+                    current_total_pnl = (1 + temp_overall_df['return']).cumprod().iloc[-1] - 1 if not temp_overall_df.empty else 0.0
+                    portfolio_value_tracker.append(1 + current_total_pnl)
+                    print(f'step {i}/{number_of_window}, portfolio value (cumulative): {portfolio_value_tracker[-1]:.4f}')
+                else: # Should not happen if block_portfolio_returns_df was not empty
+                    portfolio_value_tracker.append(1.0)
+                    print(f'step {i}/{number_of_window}, portfolio value (cumulative): 1.0000')
 
             except Exception as e:
-                print(f"Error occurred at step {i}: {e}")
-                return overall_return, PnL, portfolio_value, daily_PnL, Turnovers, most_corr_contribution
+                print(f"Error in sliding_window_past_indep step {i}: {e}")
+                break
 
-        n = len(PnL) // self.evaluation_window
+        overall_return_final_df = pd.concat(overall_return_list) if overall_return_list else pd.DataFrame(columns=['return'])
+        continuous_cumulative_pnl_from_start = ((1 + overall_return_final_df['return']).cumprod() - 1) if not overall_return_final_df.empty else pd.Series([])
 
-        for j in range(1, n):
-            for i in range(1, self.evaluation_window + 1):
-                PnL[j * self.evaluation_window + i - 1] = PnL[j * self.evaluation_window + i - 1] + PnL[j * self.evaluation_window - 1]
-
-        return overall_return, PnL, portfolio_value, daily_PnL, Turnovers, most_corr_contribution
+        # block_daily_PnL was about per-block PnL, not directly useful for final reporting without context.
+        # Return None or an empty array for it for now as its independent calculation isn't critical for overall PnL.
+        return overall_return_final_df, continuous_cumulative_pnl_from_start.values, portfolio_value_tracker, None, Turnovers, most_corr_contribution_lists

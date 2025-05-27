@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import sys
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,31 +9,31 @@ import yfinance as yf
 
 ## path Nail : '/Users/khelifanail/Documents/GitHub/Portfolio_clustering_project'
 ## path Jerome : 'C:/Users/33640/OneDrive/Documents/GitHub/Portfolio_clustering_project'
-sys.path.append(r'/Users/khelifanail/Documents/GitHub/Portfolio_clustering_project')  # Ajoute le chemin parent
+sys.path.append(r'C:\Users\james\ICAIF_25')  # Ajoute le chemin parent
 
-from signet.cluster import Cluster 
+from signet.cluster import Cluster
 from scipy import sparse
 from pypfopt.efficient_frontier import EfficientFrontier
 
 def signed_adjency(mat):
     '''
-    L'idée est ici, à partir d'une matrice de corrélation mat, de renvoyer deux matrices 
-    A_positive et A_negative qui correspondraient aux matrices des corrélations positives et négatives 
-    associées  
+    L'idée est ici, à partir d'une matrice de corrélation mat, de renvoyer deux matrices
+    A_positive et A_negative qui correspondraient aux matrices des corrélations positives et négatives
+    associées
     '''
 
     A_pos = mat.applymap(lambda x: x if x >= 0 else 0)
     A_neg = mat.applymap(lambda x: abs(x) if x < 0 else 0)
-    
+
     return A_pos, A_neg
 
-def apply_SPONGE(correlation_matrix, k): 
+def apply_SPONGE(correlation_matrix, k):
 
     '''
-    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant 
+    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant
            à chaque actif le numéro du cluster auquel il appartient une fois qu'on lui a appliqué SPONGE (à partir du package signet)
 
-    PARAMS : 
+    PARAMS :
 
     - correlation_matrix : a square dataframe of size (number_of_stocks, number_of_stocks)
     - k : the number of clusters to identify. If a list is given, the output is a corresponding list
@@ -41,8 +41,8 @@ def apply_SPONGE(correlation_matrix, k):
     RETURNS : array of int, or list of array of int: Output assignment to clusters.
 
     '''
-    
-    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
+
+    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes
 
     A_pos, A_neg = signed_adjency(correlation_matrix)
 
@@ -54,13 +54,13 @@ def apply_SPONGE(correlation_matrix, k):
 
     return cluster.SPONGE(k)
 
-def apply_signed_laplacian(correlation_matrix, k): 
+def apply_signed_laplacian(correlation_matrix, k):
 
     '''
-    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant 
+    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant
            à chaque actif le numéro du cluster auquel il appartient une fois qu'on lui a appliqué SPONGE (à partir du package signet)
 
-    PARAMS : 
+    PARAMS :
 
     - correlation_matrix : a square dataframe of size (number_of_stocks, number_of_stocks)
     - k : the number of clusters to identify. If a list is given, the output is a corresponding list
@@ -68,8 +68,8 @@ def apply_signed_laplacian(correlation_matrix, k):
     RETURNS : array of int, or list of array of int: Output assignment to clusters.
 
     '''
-    
-    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
+
+    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes
 
     A_pos, A_neg = signed_adjency(correlation_matrix)
 
@@ -84,13 +84,13 @@ def apply_signed_laplacian(correlation_matrix, k):
 
     return cluster.spectral_cluster_laplacian(k)
 
-def apply_SPONGE_sym(correlation_matrix, k): 
+def apply_SPONGE_sym(correlation_matrix, k):
 
     '''
-    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant 
+    IDÉE : étant donné une matrice de correlation obtenue à partir d'une base de donnée et de la similarité de pearson, renvoyer un vecteur associant
            à chaque actif le numéro du cluster auquel il appartient une fois qu'on lui a appliqué SPONGE (à partir du package signet)
 
-    PARAMS : 
+    PARAMS :
 
     - correlation_matrix : a square dataframe of size (number_of_stocks, number_of_stocks)
     - k : the number of clusters to identify. If a list is given, the output is a corresponding list
@@ -98,8 +98,8 @@ def apply_SPONGE_sym(correlation_matrix, k):
     RETURNS : array of int, or list of array of int: Output assignment to clusters.
 
     '''
-    
-    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes 
+
+    ## On respecte le format imposé par signet. Pour cela il faut changer le type des matrices A_pos et A_neg, qui ne peuvent pas rester des dataframes
 
     A_pos, A_neg = signed_adjency(correlation_matrix)
 
@@ -121,63 +121,63 @@ def correlation_matrix(lookback_window, df_cleaned):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : compute the correlation matrix of different stock 
+    GENERAL IDEA : compute the correlation matrix of different stock
                    returns  over a given lookback_window
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
-    
-    - lookback_window : list of length 2, [start, end] corresponding 
+    PARAMS :
+
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
 
     - df_cleaned : pandas dataframe containing the returns of the stocks
 
     ----------------------------------------------------------------
     '''
- 
+
 
     correlation_matrix = df_cleaned.iloc[lookback_window[0]:lookback_window[1], :].corr(method='pearson') ## MODIFIÉ
 
-    correlation_matrix = correlation_matrix.fillna(0) ## in case there are NaN values, we replace them with 0 
+    correlation_matrix = correlation_matrix.fillna(0) ## in case there are NaN values, we replace them with 0
 
     return correlation_matrix
 
 
-## we compute the return_centroid of each cluster to attribute intra-cluster weights according to the distance between stocks within the cluster and this 
+## we compute the return_centroid of each cluster to attribute intra-cluster weights according to the distance between stocks within the cluster and this
 ## centroid
 
 def cluster_composition_and_centroid(df_cleaned, correlation_matrix, number_of_clusters, lookback_window, clustering_method):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : 
-    1. Get the composition of each cluster (so as to compute the return 
+    GENERAL IDEA :
+    1. Get the composition of each cluster (so as to compute the return
     of each cluster seen as a new asset)
     2. Get the centroid of each cluster (so as to compute intra-cluster
-    weights that will be used to compute the overall return of each 
+    weights that will be used to compute the overall return of each
     cluster (with the idea that each stock has a different contribution
     to the overall cluster))
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
-    
-    - df_cleaned : pandas dataframe containing the returns of the 
+    PARAMS :
+
+    - df_cleaned : pandas dataframe containing the returns of the
                    stocks
 
-    - correlation_matrix : pandas dataframe as given by the previous  
+    - correlation_matrix : pandas dataframe as given by the previous
                            correlation_matrix function
 
-    - number_of_clusters : integer, corresponding to the number of 
+    - number_of_clusters : integer, corresponding to the number of
                            clusters
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
     ----------------------------------------------------------------
     '''
 
-    ## STEP 1: run the SPONGE clustering algorithm with a number of clusters fixed to be number_of_clusters and using 
+    ## STEP 1: run the SPONGE clustering algorithm with a number of clusters fixed to be number_of_clusters and using
     ##         the correlation matrix correlation_matrix ==> we store the results in result
 
     ### 1 + pd.DataFrame(...) because we want the number of clusters to range between 1 un number_of_clusters
@@ -213,7 +213,7 @@ def cluster_composition_and_centroid(df_cleaned, correlation_matrix, number_of_c
 
 
 def constituent_weights(df_cleaned, cluster_composition, sigma, lookback_window): ## sigma corresponds to some dispersion cofficient
-    
+
     '''
     ----------------------------------------------------------------
     GENERAL IDEA : compute the constituent weights (i.e.
@@ -221,23 +221,23 @@ def constituent_weights(df_cleaned, cluster_composition, sigma, lookback_window)
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
-    
-    - df_cleaned : pandas dataframe containing the returns of the 
+    PARAMS :
+
+    - df_cleaned : pandas dataframe containing the returns of the
                    stocks
 
-    - cluster_composition : numpy array as returned by the 
-                            cluster_composition_and_centroid 
+    - cluster_composition : numpy array as returned by the
+                            cluster_composition_and_centroid
                             function
 
     - sigma : parameter of dispersion
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : modifies in-place the numpy ndarray returned by the 
+    OUTPUT : modifies in-place the numpy ndarray returned by the
              cluster_composition_and_centroid function
     ----------------------------------------------------------------
     '''
@@ -253,7 +253,7 @@ def constituent_weights(df_cleaned, cluster_composition, sigma, lookback_window)
             elem_returns = df_cleaned.loc[:, elem][lookback_window[0]:lookback_window[1]].values
 
             ## we compute the distance of the stock to the centroid of the cluster
-            distance_to_centroid = np.linalg.norm(cluster_composition[cluster]['centroid'] - elem_returns)**2 
+            distance_to_centroid = np.linalg.norm(cluster_composition[cluster]['centroid'] - elem_returns)**2
 
             ## we compute the norm exp(-|x|^2/2*sigma^2)
             total_cluster_weight += np.exp(-distance_to_centroid / (2 * (sigma**2)))
@@ -272,29 +272,29 @@ def cluster_return(constituent_weights, df_cleaned, lookback_window):
     '''
     ----------------------------------------------------------------
     GENERAL IDEA : compute the return of each cluster.
-                   The steps are : 
+                   The steps are :
                    1. find the assets composing each cluster
-                   2. compute the consituent_weights weighted-average 
-                   return of all those stocks, which is by definition 
+                   2. compute the consituent_weights weighted-average
+                   return of all those stocks, which is by definition
                    the return of the cluster
-                
+
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
-    
-    - df_cleaned : pandas dataframe containing the returns of the 
+    PARAMS :
+
+    - df_cleaned : pandas dataframe containing the returns of the
                    stocks
 
-    - constituent_weights : numpy array as returned by the 
-                            constituent_weights function 
+    - constituent_weights : numpy array as returned by the
+                            constituent_weights function
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : create a single column pandas dataframe containing the 
+    OUTPUT : create a single column pandas dataframe containing the
              return of each cluster over the lookback_window days
     ----------------------------------------------------------------
     '''
@@ -303,7 +303,7 @@ def cluster_return(constituent_weights, df_cleaned, lookback_window):
 
     for cluster in constituent_weights.keys():
 
-        for ticker, weight in constituent_weights[cluster].items(): 
+        for ticker, weight in constituent_weights[cluster].items():
             ## we transpose df_cleaned to have columns for each ticker
             cluster_returns[cluster] = cluster_returns[cluster] + df_cleaned[ticker][lookback_window[0]:lookback_window[1]]*weight
 
@@ -315,32 +315,32 @@ def noised_array(y, eta):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : given an array y and a target correlation eta, 
-                   compute the array with the noise  
+    GENERAL IDEA : given an array y and a target correlation eta,
+                   compute the array with the noise
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
     - y : numpy ndarray that we want to perturb
 
-    - eta : target correlation that we want to create between y and 
+    - eta : target correlation that we want to create between y and
             its perturbated version
 
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : noised version of y that satisfies the targeted level 
+    OUTPUT : noised version of y that satisfies the targeted level
              of correlation
     ----------------------------------------------------------------
     '''
-    
-    # We compute with a small noise 
+
+    # We compute with a small noise
     epsilon_std_dev = 0.001
 
     # Calculer la corrélation initiale
     correlation = 1
-    
+
     x = y.copy()
     # Boucle pour ajuster l'écart-type du bruit jusqu'à ce que la corrélation atteigne eta
 
@@ -365,30 +365,30 @@ def markowitz_weights(cluster_return_res, constituent_weights, df_cleaned, lookb
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : compute the markowitz weights of each cluster in 
+    GENERAL IDEA : compute the markowitz weights of each cluster in
                    the synthetic portfolio using the pypfopt package
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
-    - cluster_return : numpy array as returned by the 
-                       cluster_return function 
+    - cluster_return : numpy array as returned by the
+                       cluster_return function
 
-    - df_cleaned : pandas dataframe containing the returns of the 
+    - df_cleaned : pandas dataframe containing the returns of the
                    stocks
 
-    - constituent_weights : numpy array as returned by the 
-                            constituent_weights function 
+    - constituent_weights : numpy array as returned by the
+                            constituent_weights function
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
 
-    - evaluation_window : integer, corresponding to the number of 
-                          days that we look bakc at to make our 
+    - evaluation_window : integer, corresponding to the number of
+                          days that we look bakc at to make our
                           prevision
 
-    - eta : target correlation that we want to create between y and 
+    - eta : target correlation that we want to create between y and
             its perturbated version
     ----------------------------------------------------------------
 
@@ -404,13 +404,13 @@ def markowitz_weights(cluster_return_res, constituent_weights, df_cleaned, lookb
     cov_matrix.fillna(0.)
 
     ## on construit le vecteur d'expected return du cluster (252 jours de trading par an, on passe de rendements journaliers à rendements annualisés)
-    
+
     cluster_target_return = cluster_return(constituent_weights=constituent_weights, df_cleaned=df_cleaned, lookback_window=[lookback_window[1], lookback_window[1]+evaluation_window]).mean()
-    
+
     expected_returns = noised_array(y=cluster_target_return, eta=eta)
-    
+
     ef = EfficientFrontier(expected_returns=expected_returns, cov_matrix=cov_matrix, weight_bounds=(0, 1))
-    
+
     ef.efficient_return(target_return=expected_returns.mean())
 
     markowitz_weights = ef.clean_weights()
@@ -423,22 +423,22 @@ def final_weights(markowitz_weights, constituent_weights):
     '''
     ----------------------------------------------------------------
     GENERAL IDEA : compute the final weights of each individual stock
-                   in the overal portfolio using both the constituent 
+                   in the overal portfolio using both the constituent
                    and the markowitz weights
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
-    - markowitz_weights : numpy array as returned by the 
-                          markowitz_weights function 
+    - markowitz_weights : numpy array as returned by the
+                          markowitz_weights function
 
-    - constituent_weights : integer, corresponding to the number of lookback 
+    - constituent_weights : integer, corresponding to the number of lookback
                             days (in terms of historcal returns)
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : returns the final weights of each asset, i.e. the 
+    OUTPUT : returns the final weights of each asset, i.e. the
              overall portfolio weights
     ----------------------------------------------------------------
     '''
@@ -464,28 +464,28 @@ def training_phase(lookback_window, df_cleaned, number_of_clusters, sigma, evalu
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
 
-    - df_cleaned : cleaned pandas dataframe containing the returns 
+    - df_cleaned : cleaned pandas dataframe containing the returns
                    of the stocks
 
-    - number_of_clusters : integer, corresponding to the number of 
+    - number_of_clusters : integer, corresponding to the number of
                            clusters
 
     - sigma : float, corresponding to the dispersion in the intra-
               cluster weights
 
-    - df : pandas dataframe containing the raw data 
+    - df : pandas dataframe containing the raw data
 
-    - eta : target correlation that we want to create between y and 
+    - eta : target correlation that we want to create between y and
             its perturbated version
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : returns the overall weights of each stocks in our 
+    OUTPUT : returns the overall weights of each stocks in our
              portfolio
     ----------------------------------------------------------------
     '''
@@ -496,13 +496,13 @@ def training_phase(lookback_window, df_cleaned, number_of_clusters, sigma, evalu
     ## ÉTAPE 2 : on obtient la composition des clusters et les centroïdes de ceux-ci
     cluster_composition = cluster_composition_and_centroid(df_cleaned=df_cleaned, correlation_matrix=correlation_matrix_res, number_of_clusters=number_of_clusters, lookback_window=lookback_window, clustering_method=clustering_method)
 
-    ## poids très proches ... ==> dû au fait qu'on regarde sur un trop petit échantillon (30 jours) ? 
+    ## poids très proches ... ==> dû au fait qu'on regarde sur un trop petit échantillon (30 jours) ?
 
     ## ÉTAPE 3 : on obtient les poids constitutifs de chaque actifs au sein d'un même cluster
     constituent_weights_res = constituent_weights(df_cleaned=df_cleaned, cluster_composition=cluster_composition, sigma=sigma, lookback_window=lookback_window)
 
     ## ÉTAPE 4 : on obtient les rendements de chaque cluster vu comme un actif
-    cluster_return_result = cluster_return(constituent_weights=constituent_weights_res, df_cleaned=df_cleaned, lookback_window=lookback_window) 
+    cluster_return_result = cluster_return(constituent_weights=constituent_weights_res, df_cleaned=df_cleaned, lookback_window=lookback_window)
 
     ## ÉTAPE 5 : on obtient les poids de markowitz de chaque cluster
     markowitz_weights_res = markowitz_weights(cluster_return_res=cluster_return_result, constituent_weights=constituent_weights_res, df_cleaned=df_cleaned, lookback_window=lookback_window, evaluation_window=evaluation_window, eta=eta)
@@ -511,38 +511,38 @@ def training_phase(lookback_window, df_cleaned, number_of_clusters, sigma, evalu
     W = final_weights(markowitz_weights=markowitz_weights_res, constituent_weights=constituent_weights_res)
 
     W = pd.DataFrame(list(W.items()), columns=['ticker', 'weights'])
-    
+
     W.set_index('ticker', inplace=True)
 
     return W
 
 
 
-            
+
 def consolidated_W(number_of_repetitions, lookback_window, df_cleaned, number_of_clusters, sigma, evaluation_window, eta, clustering_method='SPONGE'):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : consolidate the numpy array of weights by 
+    GENERAL IDEA : consolidate the numpy array of weights by
                    repeating the training and portfolio construction
-                   phase a certain number of times 
+                   phase a certain number of times
                    (number_of_repetitions).
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
     - number_of_repetitions : number of time we repeat the training
-                              phase and the consequent averaging 
+                              phase and the consequent averaging
                               method
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
 
-    - df_cleaned : cleaned pandas dataframe containing the returns 
+    - df_cleaned : cleaned pandas dataframe containing the returns
                    of the stocks
 
-    - number_of_clusters : integer, corresponding to the number of 
+    - number_of_clusters : integer, corresponding to the number of
                            clusters
 
     - sigma : float, corresponding to the dispersion in the intra-
@@ -583,41 +583,41 @@ def portfolio_returns(evaluation_window, df_cleaned, lookback_window, consolidat
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : given the overall weights of each asset in the 
-                   portfolio, compute the portfolio return over an 
-                   evaluation window that does not overlap with the 
-                   lookback_window. 
+    GENERAL IDEA : given the overall weights of each asset in the
+                   portfolio, compute the portfolio return over an
+                   evaluation window that does not overlap with the
+                   lookback_window.
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
-    - evaluation_window : integer, corresponding to the number of 
-                          future days (in terms of historcal returns) 
+    - evaluation_window : integer, corresponding to the number of
+                          future days (in terms of historcal returns)
                           on which we evaluate the portfolio
 
-    - lookback_window : list of length 2, [start, end] corresponding 
+    - lookback_window : list of length 2, [start, end] corresponding
                         to the range of the lookback_window
 
-    - df_cleaned : cleaned pandas dataframe containing the returns 
+    - df_cleaned : cleaned pandas dataframe containing the returns
                    of the stocks
 
-    - consolidated_W : numpy ndarray, containing the final weights 
-                      of each asset, i.e. the overall portfolio 
+    - consolidated_W : numpy ndarray, containing the final weights
+                      of each asset, i.e. the overall portfolio
                       weights
 
     - df : pandas dataframe containing the raw data
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : returns the portfolio return of each cluster in a 
+    OUTPUT : returns the portfolio return of each cluster in a
              pandas dataframe
     ----------------------------------------------------------------
     '''
 
     portfolio_returns = pd.DataFrame(index=df_cleaned.iloc[lookback_window[1]:lookback_window[1]+evaluation_window, :].index, columns=['return'], data=np.zeros(len(df_cleaned.iloc[lookback_window[1]:lookback_window[1]+evaluation_window, :].index)))
 
-    for ticker in consolidated_W.columns: 
+    for ticker in consolidated_W.columns:
 
     ##  each time we add :            the present value of the return + the weighted "contribution" of the stock 'ticker' times is weight in the portfolio
         portfolio_returns['return'] = portfolio_returns['return'] + df_cleaned[ticker][lookback_window[1]:lookback_window[1]+evaluation_window]*consolidated_W[ticker]['weight']
@@ -626,7 +626,7 @@ def portfolio_returns(evaluation_window, df_cleaned, lookback_window, consolidat
 
 
 def sliding_window(df_cleaned, lookback_window_0, number_of_clusters, sigma, clustering_method, number_of_repetition, number_of_window, evaluation_window, eta):
-    
+
     PnL = []
     daily_PnL = []
     overall_return = pd.DataFrame()
@@ -649,7 +649,7 @@ def sliding_window(df_cleaned, lookback_window_0, number_of_clusters, sigma, clu
         portfolio_value.append(portfolio_value[-1]+PnL[-1])
 
         print(portfolio_value[-1])
-        
+
         print(f'step {i}')
 
     n = len(PnL)//evaluation_window
@@ -657,9 +657,9 @@ def sliding_window(df_cleaned, lookback_window_0, number_of_clusters, sigma, clu
     for j in range(1, n):
 
         for i in range(1, evaluation_window+1):
-            
+
             PnL[j*evaluation_window + i - 1] = PnL[j*evaluation_window + i - 1] + PnL[j*evaluation_window - 1]
-    
+
     return overall_return, PnL, portfolio_value, daily_PnL
 
 
@@ -667,16 +667,16 @@ def save_to_csv(year, clustering_method, daily_PnL, PnL, overall_return):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : save the outputs of sliding_window() to csv file. 
+    GENERAL IDEA : save the outputs of sliding_window() to csv file.
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
     - year : string, corresponding to the year of trading we consider
 
-    - clustering_method : string, corresponding to the name of the 
-                          clustering method we use ('SPONGE', 
+    - clustering_method : string, corresponding to the name of the
+                          clustering method we use ('SPONGE',
                           'Signed Laplacian').
 
     - daily_PnL, PnL, overall_return : outputs of sliding_window()
@@ -706,11 +706,11 @@ def get_sp500_PnL(start_date, end_date):
     '''
     ----------------------------------------------------------------
     GENERAL IDEA : get the S&P500 index daily PnL between the star
-                   and end dates 
+                   and end dates
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
     - start_date, end_date : strings, corresponding to start and end
                              dates. The format is the datetime format
@@ -719,7 +719,7 @@ def get_sp500_PnL(start_date, end_date):
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : pandas.DataFrame containing the S&P500 index daily 
+    OUTPUT : pandas.DataFrame containing the S&P500 index daily
              between the star and end dates
     ----------------------------------------------------------------
     '''
@@ -736,7 +736,7 @@ def get_sp500_PnL(start_date, end_date):
 
 
 def plot_cumulative_PnL(PnL):
-    
+
     # Création de l'axe des abscisses (nombre de jours)
     days = np.arange(1, len(PnL) + 1)
 
@@ -762,17 +762,17 @@ def bar_plot_daily_PnL(daily_PnL):
 
     '''
     ----------------------------------------------------------------
-    GENERAL IDEA : Plot daily PnL using a barplot  
+    GENERAL IDEA : Plot daily PnL using a barplot
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    PARAMS : 
+    PARAMS :
 
-    - daily_PnL : 
+    - daily_PnL :
     ----------------------------------------------------------------
 
     ----------------------------------------------------------------
-    OUTPUT : returns the portfolio return of each cluster in a 
+    OUTPUT : returns the portfolio return of each cluster in a
              pandas dataframe
     ----------------------------------------------------------------
     '''

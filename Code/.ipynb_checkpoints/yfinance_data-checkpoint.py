@@ -30,4 +30,3 @@ end = "2022-12-01" # end date
 df = pd.DataFrame(yf.download(stock_symbols, start, end)) # data on the 198 assets
 data = np.log(df["Close"]/df["Open"]).transpose() # compute the returns of these assets
 data = data.dropna()
-
