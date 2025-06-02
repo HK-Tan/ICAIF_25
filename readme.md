@@ -33,7 +33,7 @@
   <h3 align="center">Cluster-driven Hierarchical Representation of Large Asset Universes for Optimal Portfolio Construction</h3>
 
   <p align="center">
-    Hong Kiat Tan - James Chen - Haoyang Lyu - Mihai Cucuringu
+    Hong Kiat Tan - James Chen - Haoyang Lyu - Isaac-Neil Zanoria - Mihai Cucuringu
     <br />
     <br />
     <br />
@@ -69,7 +69,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Welcome to our research project repository! This endeavor is a collaborative effort by two ENSAE students: Jérôme Allier and Nail Khelifa. We are honored to be supervised by Professor Mihai Cucuringu from the University of Oxford.
+Welcome to our research project repository! This endeavor is a collaborative effort by... We are honored to be supervised by Professor Mihai Cucuringu from UCLA.
 
 The central theme of our research revolves around the application of clustering in portfolio construction and forecasting realized covariance. Our goal is to shed light on how clustering can enhance traditional portfolio construction methods and potentially provide a more optimal risk-return tradeoff.
 
@@ -179,13 +179,9 @@ Distributed under the MIT License. See `LICENSE.txt` for more information.
 <!-- CONTACT -->
 ## Contact
 
-- Naïl Khelifa - nail.khelifa@ensae.fr
 
-- Jérôme Allier - jerome.allier@ensae.fr
 
-- Mohamed Keteb - mohamed.keteb@ensae.fr
-
-[Project Link](https://github.com/MohamedKeteb/Portfolio_clustering_project/)
+[Project Link](https://github.com/jamesdchen/ICAIF_25/)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
