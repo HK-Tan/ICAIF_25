@@ -128,7 +128,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
 def run_sliding_window_var_evaluation_vectorized(
     asset_returns_df, initial_lookback_len, eval_len, repetitions, n_clusters_config,
     cluster_method, var_order_config, sigma_intra_cluster, num_windows_config,
-    store_sample_forecasts=True, run_naive_var_comparison=True
+    store_sample_forecasts=True, run_naive_var_comparison=True, max_threads=4
 ):
     # Assumes asset_returns_df is valid, and total_T is sufficient for num_windows_config
     total_T, S = asset_returns_df.shape
@@ -177,7 +177,7 @@ def run_sliding_window_var_evaluation_vectorized(
                     ))
 
     print(f"Phase 1: Running {len(all_hyper_eval_tasks)} hyperparameter PNL calculations in parallel...")
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=max_threads) as pool:
         hyper_search_results = pool.map(_process_single_hyper_eval_task, all_hyper_eval_tasks)
     print("Phase 1: Hyperparameter PNL calculations completed.")
 
