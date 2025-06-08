@@ -179,6 +179,7 @@ def run_sliding_window_var_evaluation_vectorized(
     print(f"Phase 1: Running {len(all_hyper_eval_tasks)} hyperparameter PNL calculations in parallel...")
     with multiprocessing.Pool(processes=max_threads) as pool:
         hyper_search_results = pool.map(_process_single_hyper_eval_task, all_hyper_eval_tasks)
+        # [result.wait() for result in hyper_search_results]
     print("Phase 1: Hyperparameter PNL calculations completed.")
 
     all_final_eval_tasks = []
@@ -213,8 +214,9 @@ def run_sliding_window_var_evaluation_vectorized(
         ))
 
     print(f"Phase 2: Running {len(all_final_eval_tasks)} final window evaluations in parallel...")
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=max_threads) as pool:
         final_results_list = pool.map(_perform_final_evaluation_for_window_task, all_final_eval_tasks)
+        # [result.wait() for result in final_results_list]
     print("Phase 2: Final window evaluations completed.")
 
     all_window_pnl_cluster_list, all_window_pnl_naive_list = [], []
