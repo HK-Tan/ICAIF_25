@@ -19,7 +19,7 @@ def calculate_pnl(forecast_df, actual_df):
     # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
     # positions = np.sign(f_aligned)
 
-    # STRATEGY 2:
+    # STRATEGY 2: Weight based on the predicted return of each cluster
     positions = f_aligned / f_aligned.abs().sum()
     # print(positions)
 
