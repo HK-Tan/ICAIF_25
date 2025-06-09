@@ -58,7 +58,6 @@ def _process_single_hyper_eval_task(args_bundle):
         hyper_train_df, # lookback_df
         (0, L_hyper)    # (0, L)
     )
-    cluster_forecaster._fit(lookback_cluster_returns)
 
     forecast_horizon_for_cluster = E_hyper + 1 # E + 1
     forecasted_returns_cluster = cluster_forecaster._forecast(

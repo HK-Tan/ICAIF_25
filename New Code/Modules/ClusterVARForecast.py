@@ -1,10 +1,10 @@
 import pandas as pd
 import numpy as np
 from scipy import sparse
-from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.vector_ar.var_model import VAR
 from signet.cluster import Cluster
+import padasip as pa
 
 class ClusterVARForecaster:
     def __init__(self, n_clusters, cluster_method, var_order, sigma_for_weights=0.01):
@@ -121,29 +121,56 @@ class ClusterVARForecaster:
         output_columns = cluster_returns_df.columns
         num_forecast_steps = forecast_horizon - 1 # Assumes forecast_horizon > 0
 
-        # Assumes whole_data is not empty and self.results is not None if not cross_val
         forecast_list = []
 
-        for i in range(num_forecast_steps):
-            current_results_iter = self.results
-            current_lag_order_used_iter = self.lag_order_used
-            slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
-            # Assumes slice_end_point_for_var_fit > self.var_order
-            data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
+        if cross_val:
+            initial_model = VAR(whole_data.values[:-num_forecast_steps])
+            initial_results = initial_model.fit(self.var_order)
+            lag_order = initial_results.k_ar
+            initial_training_rows = initial_results.nobs + lag_order
 
-            if cross_val:
-                # Assumes data_for_var_model_fit_iter is not empty and has enough rows
-                model_cv = VAR(data_for_var_model_fit_iter.values)
-                current_results_iter = model_cv.fit(self.var_order) # Assumes fit succeeds
-                current_lag_order_used_iter = current_results_iter.k_ar
+            model_end = VAR(whole_data.values)
+            results_end = model_end.fit(lag_order)
+            full_regressor_matrix = results_end.endog_lagged
 
-            # Assumes current_results_iter is not None and data_for_var_model_fit_iter has enough history
-            forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
-            forecast_result = current_results_iter.forecast(y=forecast_input, steps=1)
-            forecast_list.append(forecast_result) # Assumes forecast succeeds
+            params_matrix = initial_results.params # Shape: (n_regressors, n_assets)
+            n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
+            num_assets = params_matrix.shape[1]    # Number of assets/variables
 
-        # Assumes forecast_list is not empty
-        forecast_array = np.concatenate(forecast_list, axis=0)
+            rls_filters = [pa.filters.FilterRLS(n=n_rls_inputs, mu = 1, w=params_matrix[:, i]) for i in range(num_assets)]
+
+            # The first time point we forecast is the one immediately after the initial training data.
+            forecast_start_idx = initial_training_rows
+
+            # We will loop for `num_forecast_steps` or until we run out of data.
+            for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps):
+                x_matrix_idx = t - lag_order
+                input_x = full_regressor_matrix[x_matrix_idx]
+
+                # Predict first
+                forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
+
+                # then adapt
+                target_d_vector = whole_data.iloc[t].values
+                for j in range(num_assets):
+                    # Adapt the j-th filter with the j-th target value
+                    rls_filters[j].adapt(target_d_vector[j], input_x)
+
+            forecast_array = np.array(forecast_list)
+
+        else:
+            # This branch remains the same as before
+            for i in range(num_forecast_steps):
+                current_results_iter = self.results
+                current_lag_order_used_iter = self.lag_order_used
+                slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
+                data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
+
+                forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
+                forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
+
+            forecast_array = np.concatenate(forecast_list, axis=0)
+
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
         forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
         return forecast_df.reindex(columns=output_columns, fill_value=np.nan) # Keep reindex for consistent output
@@ -167,7 +194,6 @@ class NaiveVARForecaster:
         num_forecast_steps = forecast_horizon - 1
 
         forecast_list = []
-        data_for_var_model_fit_outer = whole_data
 
         for i in range(num_forecast_steps):
             current_results_iter = self.results
