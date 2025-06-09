@@ -15,7 +15,14 @@ def calculate_pnl(forecast_df, actual_df):
     f_aligned = f_aligned.iloc[:min_len]
     a_aligned = a_aligned.iloc[:min_len]
 
-    positions = np.sign(f_aligned)
+
+    # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
+    # positions = np.sign(f_aligned)
+
+    # STRATEGY 2:
+    positions = f_aligned / f_aligned.abs().sum()
+    # print(positions)
+
     pnl_per_period_per_asset = positions * a_aligned
     total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
     return total_pnl_per_asset_or_cluster
