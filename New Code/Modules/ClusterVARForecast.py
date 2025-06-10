@@ -5,27 +5,72 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.vector_ar.var_model import VAR
 from signet.cluster import Cluster
 import padasip as pa
-
-class ClusterVARForecaster:
-    def __init__(self, n_clusters, cluster_method, var_order, sigma_for_weights=0.01):
-        self.n_clusters = max(1, int(n_clusters))
-        self.cluster_method = cluster_method
+class NaiveVARForecaster:
+    """
+    Fits a Vector Autoregression (VAR) model directly on asset returns.
+    """
+    def __init__(self, var_order):
         self.var_order = max(1, int(var_order))
-        self.sigma_for_weights = max(float(sigma_for_weights), 1e-9) # Keep basic sanity
-        self.corr_matrix_ = None
-        self.cluster_definitions_ = None
-        self.lookback_start_idx_ = None
-        self.lookback_end_idx_ = None
-        self.current_lookback_data_for_weights_ = None
         self.results = None
         self.lag_order_used = 0
 
+    def _fit(self, asset_returns_df):
+        """
+        Fits the VAR model on the provided dataframe.
+        """
+        whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
+        data_for_var = whole_data.values
+        model = VAR(data_for_var)
+        self.results = model.fit(self.var_order)
+        self.lag_order_used = self.var_order
+
+    def _forecast(self, asset_returns_df, forecast_horizon, cross_val):
+        whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
+        output_columns = asset_returns_df.columns
+        num_forecast_steps = forecast_horizon - 1
+
+        forecast_list = []
+
+        for i in range(num_forecast_steps):
+            current_results_iter = self.results
+            current_lag_order_used_iter = self.lag_order_used
+            slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
+            data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
+            forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
+            forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
+
+
+        forecast_array = np.concatenate(forecast_list, axis=0)
+        forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
+        forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
+        return forecast_df.reindex(columns=output_columns, fill_value=np.nan)
+
+
+class ClusterVARForecaster(NaiveVARForecaster):
+    """
+    Groups assets into clusters and fits a VAR model on the cluster returns.
+    Inherits from NaiveVARForecaster to reuse the core VAR fitting mechanism.
+    """
+    def __init__(self, n_clusters, cluster_method, var_order, sigma_for_weights=0.01):
+        # Initialize the parent class with the VAR order
+        super().__init__(var_order)
+
+        # Initialize clustering-specific parameters
+        self.n_clusters = max(1, int(n_clusters))
+        self.cluster_method = cluster_method
+        self.sigma_for_weights = max(float(sigma_for_weights), 1e-9)
+
+        # Attributes to store clustering results
+        self.corr_matrix_ = None
+        self.cluster_definitions_ = None # Will store tickers, centroids, and weights
+
+    # --- Helper methods for clustering (from original implementation) ---
+
     def _calculate_correlation_matrix(self, asset_returns_lookback_df):
-        # Assumes asset_returns_lookback_df is valid and has >= 2 assets
         scaler = StandardScaler()
         normalized_data = scaler.fit_transform(asset_returns_lookback_df)
         normalized_df = pd.DataFrame(normalized_data, index=asset_returns_lookback_df.index, columns=asset_returns_lookback_df.columns)
-        return normalized_df.corr(method='pearson').fillna(0) # Keep fillna for stability
+        return normalized_df.corr(method='pearson').fillna(0)
 
     def _apply_clustering_algorithm(self, correlation_matrix_df, num_clusters_to_form):
         def _get_signet_data(corr_df):
@@ -34,12 +79,11 @@ class ClusterVARForecaster:
             return (sparse.csc_matrix(pos_corr.values), sparse.csc_matrix(neg_corr.values))
 
         num_assets = correlation_matrix_df.shape[0]
-        effective_n_clusters = min(num_clusters_to_form, num_assets) # Assumes num_assets > 0
+        effective_n_clusters = min(num_clusters_to_form, num_assets)
 
         if self.cluster_method == 'Kmeans':
-            data_for_kmeans = correlation_matrix_df.fillna(0) # Keep fillna
             kmeans = KMeans(n_clusters=effective_n_clusters, random_state=0, n_init='auto')
-            labels = kmeans.fit_predict(data_for_kmeans)
+            labels = kmeans.fit_predict(correlation_matrix_df.fillna(0))
         elif self.cluster_method in ['SPONGE', 'signed_laplacian', 'SPONGE_sym']:
             signet_data = _get_signet_data(correlation_matrix_df)
             cluster_obj = Cluster(signet_data)
@@ -47,14 +91,16 @@ class ClusterVARForecaster:
             elif self.cluster_method == 'signed_laplacian': labels = cluster_obj.spectral_cluster_laplacian(effective_n_clusters)
             else: labels = cluster_obj.SPONGE_sym(effective_n_clusters)
         elif self.cluster_method == 'spectral_clustering':
-            affinity_matrix = np.abs(correlation_matrix_df.fillna(0).values) # Keep fillna
+            affinity_matrix = np.abs(correlation_matrix_df.fillna(0).values)
             affinity_matrix = (affinity_matrix + affinity_matrix.T) / 2
             np.fill_diagonal(affinity_matrix, 1)
             sc = SpectralClustering(n_clusters=effective_n_clusters, affinity='precomputed', random_state=0, assign_labels='kmeans')
             labels = sc.fit_predict(affinity_matrix)
-        else: # This is an actual error, not an edge case for data.
+        else:
             raise ValueError(f"Unknown clustering method: {self.cluster_method}")
         return labels
+
+    # --- cluster return logic ---
 
     def _define_clusters_and_centroids(self, asset_returns_lookback_df):
         self.corr_matrix_ = self._calculate_correlation_matrix(asset_returns_lookback_df)
@@ -69,15 +115,12 @@ class ClusterVARForecaster:
         for label_val in unique_labels:
             cluster_name = f'Cluster_{label_val + 1}'
             tickers_in_cluster = list(labeled_assets[labeled_assets['ClusterLabel'] == label_val].index)
-            # Assumes tickers_in_cluster and valid_tickers_for_centroid are not empty
             valid_tickers_for_centroid = [t for t in tickers_in_cluster if t in asset_returns_lookback_df.columns]
             centroid_ts = asset_returns_lookback_df[valid_tickers_for_centroid].mean(axis=1)
             cluster_definitions[cluster_name] = {'tickers': tickers_in_cluster, 'centroid_ts': centroid_ts}
         self.cluster_definitions_ = cluster_definitions
 
     def _calculate_weighted_cluster_returns(self, asset_returns_df_slice, period_indices_on_slice):
-        # Assumes self.cluster_definitions_, self.current_lookback_data_for_weights_ are set.
-        # Assumes self.lookback_start_idx_, self.lookback_end_idx_ are set.
         start_idx_slice, end_idx_slice = period_indices_on_slice
         lookback_data_for_dist_calc = self.current_lookback_data_for_weights_.iloc[self.lookback_start_idx_:self.lookback_end_idx_]
         data_slice_current_period = asset_returns_df_slice.iloc[start_idx_slice:end_idx_slice]
@@ -108,13 +151,7 @@ class ClusterVARForecaster:
 
         return pd.DataFrame(cluster_returns_dict, index=data_slice_current_period.index)
 
-    def _fit(self, cluster_returns_df):
-        whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
-        # Assumes whole_data is not empty and has enough rows for self.var_order
-        data_for_var = whole_data.values
-        model = VAR(data_for_var)
-        self.results = model.fit(self.var_order) # Assumes fit succeeds
-        self.lag_order_used = self.results.k_ar
+    # --- Overridden Core Methods ---
 
     def _forecast(self, cluster_returns_df, forecast_horizon, cross_val):
         whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
@@ -126,11 +163,12 @@ class ClusterVARForecaster:
         if cross_val:
             initial_model = VAR(whole_data.values[:-num_forecast_steps])
             initial_results = initial_model.fit(self.var_order)
-            lag_order = initial_results.k_ar
-            initial_training_rows = initial_results.nobs + lag_order
+            lag_order = self.var_order
+            initial_training_rows = initial_results.nobs - lag_order
 
             model_end = VAR(whole_data.values)
             results_end = model_end.fit(lag_order)
+            # results_end = VARReduce(lags=lag_order, regressor=ElasticNetCV(cv=5, random_state=0, max_iter=10000)).fit(whole_data.values
             full_regressor_matrix = results_end.endog_lagged
 
             params_matrix = initial_results.params # Shape: (n_regressors, n_assets)
@@ -159,58 +197,8 @@ class ClusterVARForecaster:
             forecast_array = np.array(forecast_list)
 
         else:
-            # This branch remains the same as before
-            for i in range(num_forecast_steps):
-                current_results_iter = self.results
-                current_lag_order_used_iter = self.lag_order_used
-                slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
-                data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
+            return super()._forecast(cluster_returns_df, forecast_horizon, cross_val)
 
-                forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
-                forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
-
-            forecast_array = np.concatenate(forecast_list, axis=0)
-
-        forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
-        forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
-        return forecast_df.reindex(columns=output_columns, fill_value=np.nan) # Keep reindex for consistent output
-
-class NaiveVARForecaster:
-    def __init__(self, var_order):
-        self.var_order = max(1, int(var_order))
-        self.results = None
-        self.lag_order_used = 0
-
-    def _fit(self, asset_returns_df):
-        whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
-        data_for_var = whole_data.values
-        model = VAR(data_for_var)
-        self.results = model.fit(self.var_order)
-        self.lag_order_used = self.results.k_ar
-
-    def _forecast(self, asset_returns_df, forecast_horizon, cross_val):
-        whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
-        output_columns = asset_returns_df.columns
-        num_forecast_steps = forecast_horizon - 1
-
-        forecast_list = []
-
-        for i in range(num_forecast_steps):
-            current_results_iter = self.results
-            current_lag_order_used_iter = self.lag_order_used
-            slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
-            data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
-
-            if cross_val:
-                model_cv = VAR(data_for_var_model_fit_iter.values)
-                current_results_iter = model_cv.fit(self.var_order)
-                current_lag_order_used_iter = current_results_iter.k_ar
-
-            forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
-            forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
-
-
-        forecast_array = np.concatenate(forecast_list, axis=0)
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
         forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
         return forecast_df.reindex(columns=output_columns, fill_value=np.nan)
