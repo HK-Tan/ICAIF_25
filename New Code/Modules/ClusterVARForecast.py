@@ -1,10 +1,51 @@
 import pandas as pd
 import numpy as np
 from scipy import sparse
+from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.preprocessing import StandardScaler
-from statsmodels.tsa.vector_ar.var_model import VAR
+from sklearn.linear_model import ElasticNet
 from signet.cluster import Cluster
-import padasip as pa
+from sktime.forecasting.var_reduce import VARReduce
+
+class ExpL1L2Regression:
+
+    def __init__(
+        self,
+        n: int,
+        w: np.ndarray,
+        lam: float = 0.1,
+        halflife: float = 20.0,
+        gamma: float = 0.01,
+        epsilon: float = 1e-6,
+    ):
+        self.n = n
+        self.lam = lam
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.beta = np.exp(np.log(0.5) / halflife)
+        self.w = w
+        self.P = np.diag(np.ones(self.n) * self.lam)
+
+    def update(self, x: np.ndarray, y: float) -> None:
+        r = 1 + (x.T @ self.P @ x) / self.beta
+        k = (self.P @ x) / (r * self.beta)
+        e = y - x @ self.w
+
+        k = k.reshape(-1, 1)
+
+        extra = (
+            self.gamma * ((self.beta - 1) / self.beta)
+            * (np.eye(self.n) - k @ self.w.reshape(1, -1))
+            @ self.P @ (np.sign(self.w) / (np.abs(self.w) + self.epsilon))
+        )
+
+        self.w = self.w + k.flatten() * e + extra
+
+        self.P = self.P / self.beta - (k @ k.T) * r
+
+    def predict(self, x: np.ndarray) -> float:
+        return self.w @ x
+
 class NaiveVARForecaster:
     """
     Fits a Vector Autoregression (VAR) model directly on asset returns.
@@ -36,6 +77,12 @@ class NaiveVARForecaster:
             current_lag_order_used_iter = self.lag_order_used
             slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
             data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
+
+            # if cross_val:
+            #     model_cv = VAR(data_for_var_model_fit_iter.values)
+            #     current_results_iter = model_cv.fit(self.var_order)
+            #     current_lag_order_used_iter = current_results_iter.k_ar
+
             forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
             forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
 
@@ -58,19 +105,76 @@ class ClusterVARForecaster(NaiveVARForecaster):
         # Initialize clustering-specific parameters
         self.n_clusters = max(1, int(n_clusters))
         self.cluster_method = cluster_method
+        self.current_lookback_data_for_weights_ = None
         self.sigma_for_weights = max(float(sigma_for_weights), 1e-9)
 
         # Attributes to store clustering results
         self.corr_matrix_ = None
         self.cluster_definitions_ = None # Will store tickers, centroids, and weights
 
-    # --- Helper methods for clustering (from original implementation) ---
+    # --- Helper methods (from original implementation) ---
 
     def _calculate_correlation_matrix(self, asset_returns_lookback_df):
         scaler = StandardScaler()
         normalized_data = scaler.fit_transform(asset_returns_lookback_df)
         normalized_df = pd.DataFrame(normalized_data, index=asset_returns_lookback_df.index, columns=asset_returns_lookback_df.columns)
         return normalized_df.corr(method='pearson').fillna(0)
+
+    def convert_sktime_var_coeffs_to_statsmodels(self, sktime_model, series_names=None):
+        """
+        Converts coefficients from a fitted sktime VAR/VARReduce model
+        to the format used by statsmodels VAR.
+
+        Parameters
+        ----------
+        sktime_model : sktime.forecasting.var.VAR
+            A fitted sktime VAR or VARReduce model instance.
+        series_names : list of str, optional
+            Names of the time series variables, used for creating the
+            final DataFrame index and columns.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A DataFrame with coefficients in the statsmodels format,
+            having shape (lags*k + 1, k).
+        """
+        # 1. Extract coefficients and dimensions from the sktime model
+        sk_coeffs = sktime_model.coefficients_
+        sk_intercept = sktime_model.intercept_
+        lags, k, _ = sk_coeffs.shape
+
+        # 2. Perform the "swap and reshape" for the lag coefficients
+        # Original axes: (lag, target_var, regressor_var)
+        # Swap to: (lag, regressor_var, target_var)
+        swapped_coeffs = sk_coeffs.swapaxes(1, 2)
+        # Reshape to combine lag and regressor_var into a single dimension
+        # New shape: (lags * k, k)
+        sm_lag_coeffs = swapped_coeffs.reshape(lags * k, k)
+
+        # 3. Stack the intercepts on top of the lag coefficients
+        # Final shape: (lags * k + 1, k)
+        sm_full_coeffs = np.vstack([sk_intercept, sm_lag_coeffs])
+
+        # 4. (Optional but recommended) Create a pandas DataFrame with proper labels
+        if series_names is None:
+            series_names = [f'Var{i+1}' for i in range(k)]
+
+        # Create the index for the regressors
+        regressor_index = ['const']
+        for i in range(1, lags + 1):
+            for var_name in series_names:
+                regressor_index.append(f'L{i}.{var_name}')
+
+        # Create the final DataFrame
+        params_df = pd.DataFrame(
+            sm_full_coeffs,
+            index=regressor_index,
+            columns=series_names
+        )
+        return params_df
+
+    # --- cluster return logic ---
 
     def _apply_clustering_algorithm(self, correlation_matrix_df, num_clusters_to_form):
         def _get_signet_data(corr_df):
@@ -100,8 +204,6 @@ class ClusterVARForecaster(NaiveVARForecaster):
             raise ValueError(f"Unknown clustering method: {self.cluster_method}")
         return labels
 
-    # --- cluster return logic ---
-
     def _define_clusters_and_centroids(self, asset_returns_lookback_df):
         self.corr_matrix_ = self._calculate_correlation_matrix(asset_returns_lookback_df)
         self.current_lookback_data_for_weights_ = asset_returns_lookback_df
@@ -122,7 +224,7 @@ class ClusterVARForecaster(NaiveVARForecaster):
 
     def _calculate_weighted_cluster_returns(self, asset_returns_df_slice, period_indices_on_slice):
         start_idx_slice, end_idx_slice = period_indices_on_slice
-        lookback_data_for_dist_calc = self.current_lookback_data_for_weights_.iloc[self.lookback_start_idx_:self.lookback_end_idx_]
+        lookback_data_for_dist_calc = self.current_lookback_data_for_weights_#.iloc[self.lookback_start_idx_:self.lookback_end_idx_]
         data_slice_current_period = asset_returns_df_slice.iloc[start_idx_slice:end_idx_slice]
 
         cluster_returns_dict = {}
@@ -157,25 +259,37 @@ class ClusterVARForecaster(NaiveVARForecaster):
         whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
         output_columns = cluster_returns_df.columns
         num_forecast_steps = forecast_horizon - 1 # Assumes forecast_horizon > 0
+        lag_order = self.var_order
 
         forecast_list = []
 
         if cross_val:
-            initial_model = VAR(whole_data.values[:-num_forecast_steps])
-            initial_results = initial_model.fit(self.var_order)
-            lag_order = self.var_order
-            initial_training_rows = initial_results.nobs - lag_order
+            initial_model = VARReduce(lags=lag_order, regressor=ElasticNet())
+            initial_model.fit(whole_data[:-num_forecast_steps])
+            initial_training_rows = len(whole_data) - forecast_horizon - lag_order
 
-            model_end = VAR(whole_data.values)
-            results_end = model_end.fit(lag_order)
-            # results_end = VARReduce(lags=lag_order, regressor=ElasticNetCV(cv=5, random_state=0, max_iter=10000)).fit(whole_data.values
-            full_regressor_matrix = results_end.endog_lagged
+            # Create a list to hold the lagged arrays
+            # The regressors are ordered [lag1_vars, lag2_vars, ...]
+            # For each lag i, we select the appropriate slice of the original data.
+            # The slice data_np[lag_order-i : -i] correctly aligns the lagged
+            # observations with the endogenous variables.
+            # Stack the arrays horizontally to form the final matrix
+            X_lags = np.hstack([whole_data.values[lag_order - i : -i or None, :] for i in range(1, lag_order+1)])
 
-            params_matrix = initial_results.params # Shape: (n_regressors, n_assets)
+            # Get the number of rows needed for the ones column
+            num_rows = X_lags.shape[0]
+
+            # Create a column vector of ones: shape (num_rows, 1)
+            ones_column = np.ones((num_rows, 1))
+
+            # Horizontally stack the ones column and the lags matrix
+            full_regressor_matrix = np.hstack([ones_column, X_lags])
+
+            params_matrix = self.convert_sktime_var_coeffs_to_statsmodels(initial_model) # Shape: (n_regressors, n_assets)
             n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
             num_assets = params_matrix.shape[1]    # Number of assets/variables
 
-            rls_filters = [pa.filters.FilterRLS(n=n_rls_inputs, mu = 1, w=params_matrix[:, i]) for i in range(num_assets)]
+            rls_filters = [ExpL1L2Regression(n=n_rls_inputs, w=params_matrix.iloc[:, i].values) for i in range(num_assets)]
 
             # The first time point we forecast is the one immediately after the initial training data.
             forecast_start_idx = initial_training_rows
@@ -192,12 +306,14 @@ class ClusterVARForecaster(NaiveVARForecaster):
                 target_d_vector = whole_data.iloc[t].values
                 for j in range(num_assets):
                     # Adapt the j-th filter with the j-th target value
-                    rls_filters[j].adapt(target_d_vector[j], input_x)
+                    rls_filters[j].update(input_x, target_d_vector[j])
 
             forecast_array = np.array(forecast_list)
 
+
         else:
             return super()._forecast(cluster_returns_df, forecast_horizon, cross_val)
+
 
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
         forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
