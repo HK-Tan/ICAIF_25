@@ -4,7 +4,8 @@ from scipy import sparse
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.vector_ar.var_model import VAR
 from signet.cluster import Cluster
-import padasip as pa
+import padasip as pa # For RLS filters
+
 class NaiveVARForecaster:
     """
     Fits a Vector Autoregression (VAR) model directly on asset returns.
@@ -19,24 +20,30 @@ class NaiveVARForecaster:
         Fits the VAR model on the provided dataframe.
         """
         whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
-        data_for_var = whole_data.values
+        data_for_var = whole_data.values  # df -> np.ndarray
         model = VAR(data_for_var)
         self.results = model.fit(self.var_order)
         self.lag_order_used = self.var_order
 
     def _forecast(self, asset_returns_df, forecast_horizon, cross_val):
         whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
-        output_columns = asset_returns_df.columns
-        num_forecast_steps = forecast_horizon - 1
+        output_columns = asset_returns_df.columns # stores column names for output
+        num_forecast_steps = forecast_horizon - 1 
 
         forecast_list = []
 
+        ###################################################################################
+        ## See comments below -> Don't we need to update and do a "rolling window" fit?
+        ###################################################################################
+
         for i in range(num_forecast_steps):
-            current_results_iter = self.results
+            # I think we forgot to "refit the data" 
+            current_results_iter = self.results # Fitted model instance
             current_lag_order_used_iter = self.lag_order_used
             slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
-            data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
-            forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
+            data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit] # Expanding window?
+            # That is, pick a "rolling window" instead here and update the data for each iteration?
+            forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:] # Needed to make a prediction
             forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
 
 
@@ -70,9 +77,18 @@ class ClusterVARForecaster(NaiveVARForecaster):
         scaler = StandardScaler()
         normalized_data = scaler.fit_transform(asset_returns_lookback_df)
         normalized_df = pd.DataFrame(normalized_data, index=asset_returns_lookback_df.index, columns=asset_returns_lookback_df.columns)
+        # normalized_df step converts numpy -> pandas DataFrame
         return normalized_df.corr(method='pearson').fillna(0)
 
     def _apply_clustering_algorithm(self, correlation_matrix_df, num_clusters_to_form):
+        """
+        Applies the specified clustering algorithm to the correlation matrix.
+        Args:
+            correlation_matrix_df (pd.DataFrame): The correlation matrix of asset returns.
+            num_clusters_to_form (int): The number of clusters to form.
+        Returns:
+            labels (np.ndarray): Cluster labels for each asset.
+        """
         def _get_signet_data(corr_df):
             pos_corr = corr_df.applymap(lambda x: x if x >= 0 else 0)
             neg_corr = corr_df.applymap(lambda x: abs(x) if x < 0 else 0)
@@ -121,12 +137,21 @@ class ClusterVARForecaster(NaiveVARForecaster):
         self.cluster_definitions_ = cluster_definitions
 
     def _calculate_weighted_cluster_returns(self, asset_returns_df_slice, period_indices_on_slice):
+        """
+        Calculates the weighted returns for each cluster based on the Gaussian distance from the centroid.
+        Args:
+            asset_returns_df_slice (pd.DataFrame): DataFrame slice of asset returns for the current period.
+            period_indices_on_slice (tuple): Tuple containing start and end indices for the current period slice.
+        Returns:
+            pd.DataFrame: DataFrame containing the weighted returns for each cluster.
+        """
         start_idx_slice, end_idx_slice = period_indices_on_slice
         lookback_data_for_dist_calc = self.current_lookback_data_for_weights_.iloc[self.lookback_start_idx_:self.lookback_end_idx_]
         data_slice_current_period = asset_returns_df_slice.iloc[start_idx_slice:end_idx_slice]
 
         cluster_returns_dict = {}
         for cluster_name, info in self.cluster_definitions_.items():
+            # Info contains 'tickers' and 'centroid_ts'
             tickers_in_cluster = info['tickers']
             centroid_ts_for_dist_calc = info['centroid_ts'].iloc[self.lookback_start_idx_:self.lookback_end_idx_]
 
@@ -154,6 +179,15 @@ class ClusterVARForecaster(NaiveVARForecaster):
     # --- Overridden Core Methods ---
 
     def _forecast(self, cluster_returns_df, forecast_horizon, cross_val):
+        """
+        Forecasts returns for each cluster using a VAR model.
+        Args:
+            cluster_returns_df (pd.DataFrame): DataFrame of cluster returns (from _calculate_weighted_cluster_returns).
+            forecast_horizon (int): Number of steps to forecast.
+            cross_val (bool): Whether to use cross-validation.
+        Returns:
+            pd.DataFrame: Forecasted returns for each cluster.
+        """
         whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
         output_columns = cluster_returns_df.columns
         num_forecast_steps = forecast_horizon - 1 # Assumes forecast_horizon > 0
@@ -169,21 +203,33 @@ class ClusterVARForecaster(NaiveVARForecaster):
             model_end = VAR(whole_data.values)
             results_end = model_end.fit(lag_order)
             # results_end = VARReduce(lags=lag_order, regressor=ElasticNetCV(cv=5, random_state=0, max_iter=10000)).fit(whole_data.values
-            full_regressor_matrix = results_end.endog_lagged
+            full_regressor_matrix = results_end.endog_lagged  # Concatenated matrix coefficients
+            # Shape: (n_samples, n_regressors) where n_regressors = p * (m + 1 (constant))
 
+#            # Extract the parameters from the initial results (the initialized VAR model)
             params_matrix = initial_results.params # Shape: (n_regressors, n_assets)
-            n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
+            n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m) ?????
             num_assets = params_matrix.shape[1]    # Number of assets/variables
 
             rls_filters = [pa.filters.FilterRLS(n=n_rls_inputs, mu = 1, w=params_matrix[:, i]) for i in range(num_assets)]
+            # This reads: From the padasip library, we create RLS filters for each (clustered) asset
+            # Each RLS filter is an instance of FilterRLS.  
+            # mu is the forgetting factor, w is the initial weights (parameters) for each filter.
+            # Usually, mu = 1.0, which means no forgetting (plain "RLS").
+            # Initialize RLS filters for each asset with the initial parameters from the VAR model.
+            # Hence, rls_filters[0] corresponds to coefficients for the first (cluster) asset, rls_filters[1] for the second (cluster), etc.
 
             # The first time point we forecast is the one immediately after the initial training data.
             forecast_start_idx = initial_training_rows
 
             # We will loop for `num_forecast_steps` or until we run out of data.
             for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps):
+
+                # t is a scalar, so x_matrix_idx is too (ie shifted indices of the matrix).
                 x_matrix_idx = t - lag_order
                 input_x = full_regressor_matrix[x_matrix_idx]
+                # As t progresses, we are shifting the input_x "window" to the right.
+                # This is equivalent to what we do in a rolling window forecast.
 
                 # Predict first
                 forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
@@ -191,12 +237,14 @@ class ClusterVARForecaster(NaiveVARForecaster):
                 # then adapt
                 target_d_vector = whole_data.iloc[t].values
                 for j in range(num_assets):
-                    # Adapt the j-th filter with the j-th target value
+                    # Adapt the j-th filter (ie for jth asset) with the incoming target value for the j-th asset.
                     rls_filters[j].adapt(target_d_vector[j], input_x)
 
             forecast_array = np.array(forecast_list)
 
         else:
+            # This is saying that the forecast function of the parent class will be used,
+            # using just the cluster_returns_df as input. 
             return super()._forecast(cluster_returns_df, forecast_horizon, cross_val)
 
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
