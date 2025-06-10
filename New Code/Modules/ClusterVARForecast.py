@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import ElasticNet
 from signet.cluster import Cluster
 from sktime.forecasting.var_reduce import VARReduce
+from statsmodels.tsa.api import VAR
 
 class ExpL1L2Regression:
 
