@@ -109,11 +109,12 @@ def _perform_final_evaluation_for_window_task(args_bundle):
     avg_pnl_cluster = pnl_series_cluster.mean()
 
     forecast_data_cluster_sample, actual_data_cluster_sample = None, None
-    if store_sample_forecasts_flag_for_this_window:
-        forecast_data_cluster_sample = forecasted_returns_cluster
-        actual_data_cluster_sample = true_eval_returns_cluster
-        forecast_data_cluster_sample.index = pd.RangeIndex(len(forecast_data_cluster_sample))
-        actual_data_cluster_sample.index = pd.RangeIndex(len(actual_data_cluster_sample))
+    
+    # if store_sample_forecasts_flag_for_this_window:
+    forecast_data_cluster_sample = forecasted_returns_cluster
+    actual_data_cluster_sample = true_eval_returns_cluster
+    forecast_data_cluster_sample.index = pd.RangeIndex(len(forecast_data_cluster_sample))
+    actual_data_cluster_sample.index = pd.RangeIndex(len(actual_data_cluster_sample))
 
     # --- NaiveVARForecaster part ---
     avg_pnl_naive = np.nan # Default if not run
@@ -228,8 +229,11 @@ def run_sliding_window_var_evaluation_vectorized(
     all_window_pnl_cluster_list, all_window_pnl_naive_list = [], []
     sample_forecast_data_cluster, sample_actual_data_cluster, sample_window_idx_cluster = None, None, None
 
-    for result_tuple in final_results_list:
-        win_idx, pnl_c, pnl_n, n_c_sel, vo_sel, fc_samp, ac_samp = result_tuple
+    cluster_return_forecasts_list = []
+    cluster_return_actual_list = []
+    
+    for i, result_tuple in enumerate(final_results_list):
+        win_idx, pnl_c, pnl_n, n_c_sel, vo_sel, forecast_returns, actual_returns = result_tuple
 
         all_window_pnl_cluster_list.append({ # Assumes pnl_c is a valid number
             'Window_ID': win_idx, 'Avg_Window_PNL': pnl_c,
@@ -242,16 +246,25 @@ def run_sliding_window_var_evaluation_vectorized(
             })
 
         if store_sample_forecasts and (win_idx == num_actual_windows - 1):
-            # Assumes fc_samp and ac_samp are valid if this condition is met
-             sample_forecast_data_cluster = fc_samp
-             sample_actual_data_cluster = ac_samp
+            # Assumes forecast_returns and actual_returns are valid if this condition is met
+             sample_forecast_data_cluster = forecast_returns
+             sample_actual_data_cluster = actual_returns
              sample_window_idx_cluster = win_idx
+        
+        print(i)
+        cluster_return_forecasts_list.append(forecast_returns.copy())
+        cluster_return_actual_list.append(actual_returns.copy())
+
+
+
 
     results_dict = {
         'cluster_avg_pnl_list': all_window_pnl_cluster_list,
         'sample_forecast_cluster': sample_forecast_data_cluster,
         'sample_actual_cluster': sample_actual_data_cluster,
-        'sample_window_idx_cluster': sample_window_idx_cluster
+        'sample_window_idx_cluster': sample_window_idx_cluster,
+        'per_cluster_forecasted_return':cluster_return_forecasts_list,
+        'per_cluster_actual_return':cluster_return_actual_list,
     }
     if run_naive_var_comparison:
         results_dict['naive_avg_pnl_list'] = all_window_pnl_naive_list
