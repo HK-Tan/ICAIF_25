@@ -60,7 +60,7 @@ def _process_single_hyper_eval_task(args_bundle):
     window_idx, hyper_train_df_tuple, hyper_eval_df_tuple, \
     L_hyper, E_hyper, asset_columns_list, \
     k_val, cluster_method_param, p_val, sigma_param, \
-    rep_idx, k_idx, p_idx = args_bundle
+    rep_idx, k_idx, p_idx, pnl_method = args_bundle
 
     hyper_train_df = pd.DataFrame(
         hyper_train_df_tuple[0],
@@ -100,7 +100,7 @@ def _process_single_hyper_eval_task(args_bundle):
         (0, E_hyper)    # (0, E)
     )
 
-    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster)
+    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
     avg_pnl_cluster = pnl_series_cluster.mean() # Assumes pnl_series_cluster is not empty
 
     pnl = avg_pnl_cluster # This was the return of _hyperparameter_search_worker
