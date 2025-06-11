@@ -3,7 +3,7 @@ import numpy as np
 import multiprocessing
 from ClusterVARForecast import ClusterVARForecaster, NaiveVARForecaster
 
-def calculate_pnl(forecast_df, actual_df):
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     # Assumes forecast_df and actual_df are valid, have common columns, and alignable indices
     common_cols = forecast_df.columns.intersection(actual_df.columns)
     f_aligned, a_aligned = forecast_df[common_cols].copy(), actual_df[common_cols].copy()
@@ -17,15 +17,40 @@ def calculate_pnl(forecast_df, actual_df):
 
 
     # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
-    # positions = np.sign(f_aligned)
-
+    if pnl_strategy=="naive":
+        positions = np.sign(f_aligned)
+     
+    
     # STRATEGY 2: Weight based on the predicted return of each cluster
-    positions = f_aligned / f_aligned.abs().sum()
-    # print(positions)
+    if pnl_strategy=="weighted":
+        [i,j]=f_aligned.shape
+        positions = f_aligned*i / f_aligned.abs().sum()
+
+    
+    # STRATEGY 3: Only choose clusters with absolute returns above average
+    if pnl_strategy=="top":
+        [i,j]=f_aligned.shape
+        positions=np.zeros((i,j))
+        for col in range(j):
+            absolute_val=f_aligned[:,j].abs()
+            mean_val=absolute_val.mean()
+            positions[:,j]=[value > mean_val for value in absolute_val]
+            positions[:,j]=(i/positions[:,j].sum())*positions[:,j]
+
+        pnl_per_period_per_asset = positions * a_aligned.abs()
+        total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
+        return total_pnl_per_asset_or_cluster
+        
+  
 
     pnl_per_period_per_asset = positions * a_aligned
     total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
     return total_pnl_per_asset_or_cluster
+
+    
+    
+
+
 
 def _process_single_hyper_eval_task(args_bundle):
     """
@@ -37,7 +62,7 @@ def _process_single_hyper_eval_task(args_bundle):
     window_idx, hyper_train_df_tuple, hyper_eval_df_tuple, \
     L_hyper, E_hyper, asset_columns_list, \
     k_val, cluster_method_param, p_val, sigma_param, \
-    rep_idx, k_idx, p_idx = args_bundle
+    rep_idx, k_idx, p_idx, pnl_method = args_bundle
 
     hyper_train_df = pd.DataFrame(
         hyper_train_df_tuple[0],
@@ -77,7 +102,7 @@ def _process_single_hyper_eval_task(args_bundle):
         (0, E_hyper)    # (0, E)
     )
 
-    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster)
+    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
     avg_pnl_cluster = pnl_series_cluster.mean() # Assumes pnl_series_cluster is not empty
 
     pnl = avg_pnl_cluster # This was the return of _hyperparameter_search_worker
@@ -88,7 +113,7 @@ def _process_single_hyper_eval_task(args_bundle):
 def _perform_final_evaluation_for_window_task(args_bundle):
     window_idx, lookback_df_tuple, eval_df_tuple, L_window, E_window, asset_columns_list, \
     best_n_clusters, best_var_order, cluster_method_param, sigma_param, \
-    run_naive_var_comparison_flag, store_sample_forecasts_flag_for_this_window = args_bundle
+    run_naive_var_comparison_flag, store_sample_forecasts_flag_for_this_window, pnl_method = args_bundle
 
     lookback_df = pd.DataFrame(lookback_df_tuple[0], index=lookback_df_tuple[1], columns=lookback_df_tuple[2])
     eval_df = pd.DataFrame(eval_df_tuple[0], index=eval_df_tuple[1], columns=eval_df_tuple[2])
@@ -105,7 +130,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
     forecast_horizon = E_window + 1
     true_eval_returns_cluster = cluster_forecaster._calculate_weighted_cluster_returns(eval_df, (0, E_window))
     forecasted_returns_cluster = cluster_forecaster._forecast(true_eval_returns_cluster, forecast_horizon, cross_val=False)
-    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster)
+    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
     avg_pnl_cluster = pnl_series_cluster.mean()
 
     forecast_data_cluster_sample, actual_data_cluster_sample = None, None
@@ -126,7 +151,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
         forecast_horizon = E_window + 1
         forecasted_returns_naive = naive_forecaster._forecast(eval_df, forecast_horizon, cross_val=False)
         forecasted_returns_naive = forecasted_returns_naive.reindex(columns=eval_df.columns, fill_value=np.nan)
-        pnl_series_naive = calculate_pnl(forecasted_returns_naive, eval_df)
+        pnl_series_naive = calculate_pnl(forecasted_returns_naive, eval_df, pnl_method)
         avg_pnl_naive = pnl_series_naive.mean()
 
     return window_idx, avg_pnl_cluster, avg_pnl_naive, float(best_n_clusters), float(best_var_order), \
