@@ -111,7 +111,7 @@ def _process_single_hyper_eval_task(args_bundle):
 def _perform_final_evaluation_for_window_task(args_bundle):
     window_idx, lookback_df_tuple, eval_df_tuple, L_window, E_window, asset_columns_list, \
     best_n_clusters, best_var_order, cluster_method_param, sigma_param, \
-    run_naive_var_comparison_flag, store_sample_forecasts_flag_for_this_window = args_bundle
+    run_naive_var_comparison_flag, store_sample_forecasts_flag_for_this_window, pnl_method = args_bundle
 
     lookback_df = pd.DataFrame(lookback_df_tuple[0], index=lookback_df_tuple[1], columns=lookback_df_tuple[2])
     eval_df = pd.DataFrame(eval_df_tuple[0], index=eval_df_tuple[1], columns=eval_df_tuple[2])
@@ -128,7 +128,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
     forecast_horizon = E_window + 1
     true_eval_returns_cluster = cluster_forecaster._calculate_weighted_cluster_returns(eval_df, (0, E_window))
     forecasted_returns_cluster = cluster_forecaster._forecast(true_eval_returns_cluster, forecast_horizon, cross_val=False)
-    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster)
+    pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
     avg_pnl_cluster = pnl_series_cluster.mean()
 
     forecast_data_cluster_sample, actual_data_cluster_sample = None, None
@@ -149,7 +149,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
         forecast_horizon = E_window + 1
         forecasted_returns_naive = naive_forecaster._forecast(eval_df, forecast_horizon, cross_val=False)
         forecasted_returns_naive = forecasted_returns_naive.reindex(columns=eval_df.columns, fill_value=np.nan)
-        pnl_series_naive = calculate_pnl(forecasted_returns_naive, eval_df)
+        pnl_series_naive = calculate_pnl(forecasted_returns_naive, eval_df, pnl_method)
         avg_pnl_naive = pnl_series_naive.mean()
 
     return window_idx, avg_pnl_cluster, avg_pnl_naive, float(best_n_clusters), float(best_var_order), \
