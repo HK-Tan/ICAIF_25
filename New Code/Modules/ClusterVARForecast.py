@@ -67,6 +67,10 @@ class NaiveVARForecaster:
         self.lag_order_used = self.var_order
 
     def _forecast(self, asset_returns_df, forecast_horizon, cross_val):
+        """
+        This forecast function should be inherited to perform forecasting for any VAR model.
+        I feel like (think about if this is true) that the _forecast method should be the same for all VAR models (including ClusterVAR)
+        """
         whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
         output_columns = asset_returns_df.columns # stores column names for output
         num_forecast_steps = forecast_horizon - 1 
@@ -288,6 +292,22 @@ class ClusterVARForecaster(NaiveVARForecaster):
             cross_val (bool): Whether to use cross-validation.
         Returns:
             pd.DataFrame: Forecasted returns for each cluster.
+
+        Remark: Adding an additional output (ie se for each cluster)   (low, point, high) -> res.forecast_interval(
+        y0, steps=steps, alpha=alpha)
+
+        Suggestion - Consider returning the following:
+            pd.DataFrame: Forecasted returns for each cluster.
+            pd.DataFrame: Standard errors for the forecasted returns.
+
+        For each code that runs _forecast -> xxxx._forecast()[0]
+        df -> k^2*p + k <= lookback_window_size
+
+        Iterative Scheme:
+        kmin, kmax, pmin, pmax
+        for k in range(kmin, kmax+1):
+            for p in range(pmin, pmax+1):
+                check inequality, if true, append (k,p) in some list of candidate (k,p)
         """
         whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
         output_columns = cluster_returns_df.columns
