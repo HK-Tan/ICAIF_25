@@ -3,7 +3,7 @@ import numpy as np
 import multiprocessing
 from ClusterVARForecast import ClusterVARForecaster, NaiveVARForecaster
 
-def calculate_pnl(forecast_df, actual_df):
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     # Assumes forecast_df and actual_df are valid, have common columns, and alignable indices
     common_cols = forecast_df.columns.intersection(actual_df.columns)
     f_aligned, a_aligned = forecast_df[common_cols].copy(), actual_df[common_cols].copy()
@@ -17,15 +17,38 @@ def calculate_pnl(forecast_df, actual_df):
 
 
     # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
-    # positions = np.sign(f_aligned)
-
+    if pnl_strategy=="naive":
+        positions = np.sign(f_aligned)
+     
+    
     # STRATEGY 2: Weight based on the predicted return of each cluster
-    positions = f_aligned / f_aligned.abs().sum()
-    # print(positions)
+    if pnl_strategy=="weighted":
+        positions = f_aligned / f_aligned.abs().sum()
+
+    
+    # STRATEGY 3: Only choose clusters with absolute returns above average
+    if pnl_strategy=="top":
+        [i,j]=f_aligned.shape
+        positions=np.zeros((i,j))
+        for col in range(j):
+            absolute_val=f_aligned[:,j].abs()
+            mean_val=absolute_val.mean()
+            positions[:,j]=[value > mean_val for value in absolute_val]
+
+        pnl_per_period_per_asset = positions * a_aligned.abs()
+        total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
+        return total_pnl_per_asset_or_cluster
+        
+  
 
     pnl_per_period_per_asset = positions * a_aligned
     total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
     return total_pnl_per_asset_or_cluster
+
+    
+    
+
+
 
 def _process_single_hyper_eval_task(args_bundle):
     """
