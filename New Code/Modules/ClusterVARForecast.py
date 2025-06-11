@@ -73,7 +73,7 @@ class NaiveVARForecaster:
         """
         whole_data = asset_returns_df.astype(float).dropna(axis=1, how='all')
         output_columns = asset_returns_df.columns # stores column names for output
-        num_forecast_steps = forecast_horizon - 1 
+        num_forecast_steps = forecast_horizon - 1
 
         forecast_list = []
 
@@ -82,7 +82,7 @@ class NaiveVARForecaster:
         ###################################################################################
 
         for i in range(num_forecast_steps):
-            # I think we forgot to "refit the data" 
+            # I think we forgot to "refit the data"
             current_results_iter = self.results # Fitted model instance
             current_lag_order_used_iter = self.lag_order_used
             slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
@@ -283,34 +283,20 @@ class ClusterVARForecaster(NaiveVARForecaster):
 
     # --- Overridden Core Methods ---
 
-    def _forecast(self, cluster_returns_df, forecast_horizon, cross_val):
+    def _fit(self, returns_df):
         """
-        Forecasts returns for each cluster using a VAR model.
-        Args:
-            cluster_returns_df (pd.DataFrame): DataFrame of cluster returns (from _calculate_weighted_cluster_returns).
-            forecast_horizon (int): Number of steps to forecast.
-            cross_val (bool): Whether to use cross-validation.
-        Returns:
-            pd.DataFrame: Forecasted returns for each cluster.
-
-        Remark: Adding an additional output (ie se for each cluster)   (low, point, high) -> res.forecast_interval(
-        y0, steps=steps, alpha=alpha)
-
-        Suggestion - Consider returning the following:
-            pd.DataFrame: Forecasted returns for each cluster.
-            pd.DataFrame: Standard errors for the forecasted returns.
-
-        For each code that runs _forecast -> xxxx._forecast()[0]
-        df -> k^2*p + k <= lookback_window_size
-
-        Iterative Scheme:
-        kmin, kmax, pmin, pmax
-        for k in range(kmin, kmax+1):
-            for p in range(pmin, pmax+1):
-                check inequality, if true, append (k,p) in some list of candidate (k,p)
+        Fits the VAR model on the provided dataframe.
         """
-        whole_data = cluster_returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
-        output_columns = cluster_returns_df.columns
+        whole_data = returns_df.astype(float).dropna(axis=1, how='all')
+        data_for_var = whole_data.values  # df -> np.ndarray
+        self.results = VARReduce(self.var_order, regressor=ElasticNet())
+        self.results.fit(data_for_var)
+        self.lag_order_used = self.var_order
+
+    def _forecast(self, returns_df, forecast_horizon, cross_val):
+
+        whole_data = returns_df.astype(float).dropna(axis=1, how='all') # Keep dropna
+        output_columns = returns_df.columns
         num_forecast_steps = forecast_horizon - 1 # Assumes forecast_horizon > 0
         lag_order = self.var_order
 
@@ -319,7 +305,9 @@ class ClusterVARForecaster(NaiveVARForecaster):
         if cross_val:
             initial_model = VARReduce(lags=lag_order, regressor=ElasticNet())
             initial_model.fit(whole_data[:-num_forecast_steps])
-            initial_training_rows = len(whole_data) - forecast_horizon - lag_order
+
+            # The first time point we forecast is the one immediately after the initial training data.
+            forecast_start_idx = len(whole_data) - forecast_horizon - lag_order
 
             # Create a list to hold the lagged arrays
             # The regressors are ordered [lag1_vars, lag2_vars, ...]
@@ -338,42 +326,36 @@ class ClusterVARForecaster(NaiveVARForecaster):
             # Horizontally stack the ones column and the lags matrix
             full_regressor_matrix = np.hstack([ones_column, X_lags])
 
-            params_matrix = self.convert_sktime_var_coeffs_to_statsmodels(initial_model) # Shape: (n_regressors, n_assets)
-            n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
-            num_assets = params_matrix.shape[1]    # Number of assets/variables
-
-            rls_filters = [ExpL1L2Regression(n=n_rls_inputs, w=params_matrix.iloc[:, i].values) for i in range(num_assets)]
-
-            # The first time point we forecast is the one immediately after the initial training data.
-            forecast_start_idx = initial_training_rows
-
-            # We will loop for `num_forecast_steps` or until we run out of data.
-            for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps):
-
-                # t is a scalar, so x_matrix_idx is too (ie shifted indices of the matrix).
-                x_matrix_idx = t - lag_order
-                input_x = full_regressor_matrix[x_matrix_idx]
-                # As t progresses, we are shifting the input_x "window" to the right.
-                # This is equivalent to what we do in a rolling window forecast.
-
-                # Predict first
-                forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
-
-                # then adapt
-                target_d_vector = whole_data.iloc[t].values
-                for j in range(num_assets):
-                    # Adapt the j-th filter with the j-th target value
-                    rls_filters[j].update(input_x, target_d_vector[j])
-
-            forecast_array = np.array(forecast_list)
-
+            model = initial_model
 
         else:
-            # This is saying that the forecast function of the parent class will be used,
-            # using just the cluster_returns_df as input. 
-            return super()._forecast(cluster_returns_df, forecast_horizon, cross_val)
+            X_lags = np.hstack([whole_data.values[lag_order - i : -i or None, :] for i in range(1, lag_order+1)])
+            num_rows = X_lags.shape[0]
+            ones_column = np.ones((num_rows, 1))
+            full_regressor_matrix = np.hstack([ones_column, X_lags])
+            forecast_start_idx = 0
+            model = self.results
 
+        params_matrix = self.convert_sktime_var_coeffs_to_statsmodels(model) # Shape: (n_regressors, n_assets)
+        n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
+        num_assets = params_matrix.shape[1]    # Number of assets/variables
 
+        rls_filters = [ExpL1L2Regression(n=n_rls_inputs, w=params_matrix.iloc[:, i].values) for i in range(num_assets)]
+
+        # We will loop for `num_forecast_steps` or until we run out of data.
+        for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps - self.lag_order_used):
+            input_x = full_regressor_matrix[t]
+
+            # Predict first
+            forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
+
+            # then adapt
+            target_d_vector = whole_data.iloc[t].values
+            for j in range(num_assets):
+                # Adapt the j-th filter with the j-th target value
+                rls_filters[j].update(input_x, target_d_vector[j])
+
+        forecast_array = np.array(forecast_list)
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
         forecast_df = pd.DataFrame(forecast_array, columns=whole_data.columns, index=forecast_index)
         return forecast_df.reindex(columns=output_columns, fill_value=np.nan)
