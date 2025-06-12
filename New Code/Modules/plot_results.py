@@ -9,7 +9,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_returns(results_dict, convert_to_linear=False):
+import numpy as np
+import matplotlib.pyplot as plt
+
+####################################### PNL ########################################
+
+def plot_returns(results_dict, convert_to_linear=False, strategy="Unknown Strategy"):
     # Your data list
     data = results_dict['cluster_avg_pnl_list']
 
@@ -42,14 +47,19 @@ def plot_returns(results_dict, convert_to_linear=False):
         y_label_window = "Window Log Return"
         y_label_cumulative = "Cumulative Log Return"
 
+    # Compute Sharpe ratio for the entire trial (mean of all returns / std of all returns)
+    total_avg_return = np.mean(avg_pnls)  # Mean of all window returns
+    total_std_return = np.std(avg_pnls)  # Std of all window returns
+    sharpe_ratio = total_avg_return / total_std_return if total_std_return != 0 else 0
+
     # Create plot
-    fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    fig, axs = plt.subplots(2, 1, figsize=(24, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
 
     # Plot 1: Avg return and cumulative return
     ax1 = axs[0]
     line1 = ax1.plot(window_ids, avg_pnls_display, marker='o', label="Window Return")
     ax1.set_ylabel(y_label_window)
-    ax1.set_title("Window Return and Cumulative Return")
+    ax1.set_title(f"Window Return and Cumulative Return\nSharpe Ratio: {sharpe_ratio:.2f} | Strategy: {strategy}")
 
     # Second y-axis for cumulative return
     ax2 = ax1.twinx()
@@ -76,6 +86,7 @@ def plot_returns(results_dict, convert_to_linear=False):
     return
 
 
+####################################### INTERWINDOW ########################################
 
 
 def plot_interwindow_errors(results_dict):
@@ -114,7 +125,7 @@ def plot_interwindow_errors(results_dict):
     window_ids = np.arange(len(window_cluster_rmse))
 
     # Create figure with 3 subplots
-    fig, axs = plt.subplots(3, 1, figsize=(14, 12), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
+    fig, axs = plt.subplots(3, 1, figsize=(24, 12), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
 
     flier_properties = dict(marker='o', markerfacecolor='red', markersize=3)
 
@@ -154,6 +165,8 @@ def plot_interwindow_errors(results_dict):
     plt.show()
     return
 
+####################################### INWINDOW ########################################
+
 def plot_inwindow_errors(results_dict):
     # Load data
     forecast_list = results_dict['per_cluster_forecasted_return']
@@ -180,23 +193,35 @@ def plot_inwindow_errors(results_dict):
     for rmse_series, n_clusters in zip(window_rmse_series, cluster_count_series):
         rmse_by_cluster_count[n_clusters].append(rmse_series)
 
-    # Compute means
+    # Compute ragged means per cluster count
     mean_rmse_by_cluster_count = {}
     window_count_by_cluster = {}
 
     for n_clusters, series_list in rmse_by_cluster_count.items():
-        stacked = np.vstack(series_list)
-        mean_rmse_by_cluster_count[n_clusters] = stacked.mean(axis=0)
+        max_len = max(len(s) for s in series_list)
+        mean_rmse = []
+
+        for day in range(max_len):
+            day_values = [s[day] for s in series_list if len(s) > day]
+            mean_rmse.append(np.mean(day_values))
+
+        mean_rmse_by_cluster_count[n_clusters] = np.array(mean_rmse)
         window_count_by_cluster[n_clusters] = len(series_list)
 
-    # Compute overall mean RMSE across all windows
-    all_rmse = np.vstack(window_rmse_series)
-    overall_mean_rmse = all_rmse.mean(axis=0)
+    # Compute overall ragged mean RMSE across all windows
+    max_global_len = max(len(s) for s in window_rmse_series)
+    overall_mean_rmse = []
+
+    for day in range(max_global_len):
+        day_values = [s[day] for s in window_rmse_series if len(s) > day]
+        overall_mean_rmse.append(np.mean(day_values))
+
+    overall_mean_rmse = np.array(overall_mean_rmse)
 
     # Determine shared y-limits for boxplots
-    # Use np.nanmin and np.nanmax to safely handle NaN values
-    global_ymin = np.nanmin([np.nanmin(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count])
-    global_ymax = np.nanmax([np.nanmax(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count])
+    all_values = np.concatenate(window_rmse_series)
+    global_ymin = np.nanmin(all_values)
+    global_ymax = np.nanmax(all_values)
 
     # ---------------------------------------------------------
     # Plot combined comparison + box-and-whiskers
@@ -206,7 +231,7 @@ def plot_inwindow_errors(results_dict):
     height_ratios = [1.5] + [0.8] * num_clusters
 
     fig, axs = plt.subplots(
-        total_subplots, 1, figsize=(14, 3.5 * total_subplots),
+        total_subplots, 1, figsize=(28, 3.5 * total_subplots),
         gridspec_kw={'height_ratios': height_ratios}, sharex=True
     )
 
@@ -229,18 +254,17 @@ def plot_inwindow_errors(results_dict):
     # Bottom plots: per-cluster box-and-whisker subplots
     for ax, n_clusters in zip(axs[1:], sorted(rmse_by_cluster_count.keys())):
         series_list = rmse_by_cluster_count[n_clusters]
-        stacked = np.vstack(series_list)
-        
-        ax.boxplot([stacked[:, day] for day in range(stacked.shape[1])],
-                positions=np.arange(stacked.shape[1]),
-                widths=0.6)
-        
+        max_len = max(len(s) for s in series_list)
+        data_for_box = [
+            [s[day] for s in series_list if len(s) > day]
+            for day in range(max_len)
+        ]
+
+        ax.boxplot(data_for_box, positions=np.arange(len(data_for_box)), widths=0.6)
         ax.set_ylim(global_ymin, global_ymax)
         ax.set_ylabel(f"In-Window RMSE\n{n_clusters} Clusters (N={window_count_by_cluster[n_clusters]})")
         ax.grid(True)
 
-    # Bottom axis
     axs[-1].set_xlabel("Day in Window")
-
     plt.tight_layout()
     plt.show()
