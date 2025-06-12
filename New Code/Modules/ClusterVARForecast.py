@@ -351,7 +351,10 @@ class ClusterVARForecaster(NaiveVARForecaster):
         #         rls_filters[j].update(input_x, target_d_vector[j])
         rls_filter = CppExpL1L2Regression(
             initial_w=params_matrix.T, # Pass transposed weights (assets x features)
-            n_features=n_rls_inputs
+            n_features=n_rls_inputs,
+            halflife=2000,
+            lam=0.5,
+            gamma=0.5,
             # other params like lam, halflife, etc., can be passed here
         )
 
