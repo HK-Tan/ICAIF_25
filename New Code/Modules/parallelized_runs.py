@@ -24,7 +24,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     # STRATEGY 2: Weight based on the predicted return of each cluster
     if pnl_strategy=="weighted":
         [i,j]=f_aligned.shape
-        positions = f_aligned*i / f_aligned.abs().sum(axis=0)
+        positions = f_aligned*i / f_aligned.abs().mean(axis=0)
 
     
     # STRATEGY 3: Only choose clusters with absolute returns above average
@@ -37,8 +37,10 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
             absolute_val=f_col.abs()
             mean_val=absolute_val.mean()
             positions_positive=[value > mean_val for value in f_col]
-            positions_negative=-1*[value < -1*mean_val for value in f_col]      
-            positions[:,col]=positions_positive + positions_negative
+            positions_positive=[int(x) for x in positions_positive]
+            positions_negative=[value < -mean_val for value in f_col]
+            positions_negative=[int(x)-1 for x in positions_negative]
+            positions[:,col]=[x + y for x, y in zip(positions_positive, positions_negative)]
             positions[:,col]=(i/np.abs(positions[:,col]).sum())*positions[:,col]
 
         pnl_per_period_per_asset = positions * a_aligned
