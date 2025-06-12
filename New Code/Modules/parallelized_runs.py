@@ -18,7 +18,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
 
     # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
     if pnl_strategy=="naive":
-        positions = np.sign(f_aligned)
+        positions = -1 * np.sign(f_aligned)
      
     
     # STRATEGY 2: Weight based on the predicted return of each cluster
@@ -34,7 +34,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
         positions = f_aligned.div(row_abs_sum, axis=0) * j
 
         # If you want to fill any potential NaNs (from zero division) with zero positions:
-        positions = positions.fillna(0)
+        positions = -1 * positions.fillna(0)
 
     
     # STRATEGY 3: Only choose clusters with absolute returns above average
@@ -51,7 +51,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
             positions_negative=[value < -mean_val for value in f_col]
             positions_negative=[int(x)-1 for x in positions_negative]
             positions[:,col]=[x + y for x, y in zip(positions_positive, positions_negative)]
-            positions[:,col]=(i/np.abs(positions[:,col]).sum())*positions[:,col]
+            positions[:,col]=-1 * (i/np.abs(positions[:,col]).sum())*positions[:,col]
 
         pnl_per_period_per_asset = positions * a_aligned
         total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
@@ -311,7 +311,7 @@ def run_sliding_window_var_evaluation_vectorized(
              sample_actual_data_cluster = actual_returns
              sample_window_idx_cluster = win_idx
         
-        print(i)
+        # print(i)
         cluster_return_forecasts_list.append(forecast_returns.copy())
         cluster_return_actual_list.append(actual_returns.copy())
 
