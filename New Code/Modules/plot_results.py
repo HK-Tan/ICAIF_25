@@ -91,6 +91,7 @@ def plot_interwindow_errors(results_dict):
     # Storage for RMSEs and relative MAEs
     window_cluster_rmse = []
     window_cluster_relative_mae = []
+    window_cluster_relative_rmse = []
 
     # Loop over each window
     for forecast_df, actual_df in zip(forecast_list, actual_list):
@@ -106,7 +107,9 @@ def plot_interwindow_errors(results_dict):
         # Compute relative MAE (normalize by mean absolute actual value)
         mean_actual = actual_df.abs().mean()
         relative_mae = cluster_maes / mean_actual
+        relative_rmse = cluster_rmses / mean_actual
         window_cluster_relative_mae.append(relative_mae.values)
+        window_cluster_relative_rmse.append(relative_rmse.values)
 
     window_ids = np.arange(len(window_cluster_rmse))
 
@@ -119,10 +122,16 @@ def plot_interwindow_errors(results_dict):
     axs[0].set_title("Cluster-wise Forecast RMSE per Window")
     axs[0].grid(True)
 
-    # Subplot 2: Relative MAE boxplot
-    axs[1].boxplot(window_cluster_relative_mae, positions=window_ids, widths=0.6)
-    axs[1].set_ylabel("Relative MAE")
-    axs[1].set_title("Cluster-wise Normalized MAE per Window")
+    # # Subplot 2: Relative MAE boxplot
+    # axs[1].boxplot(window_cluster_relative_mae, positions=window_ids, widths=0.6)
+    # axs[1].set_ylabel("Relative MAE")
+    # axs[1].set_title("Cluster-wise Normalized MAE per Window")
+    # axs[1].grid(True)
+
+    # Subplot 2: Relative RMSE boxplot
+    axs[1].boxplot(window_cluster_relative_rmse, positions=window_ids, widths=0.6)
+    axs[1].set_ylabel("Relative RMSE")
+    axs[1].set_title("Cluster-wise Normalized RMSE per Window")
     axs[1].grid(True)
 
     # Subplot 3: N_Clusters and VAR_Order bar chart
