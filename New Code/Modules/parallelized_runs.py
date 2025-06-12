@@ -24,7 +24,17 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     # STRATEGY 2: Weight based on the predicted return of each cluster
     if pnl_strategy=="weighted":
         [i,j]=f_aligned.shape
-        positions = f_aligned*i / f_aligned.abs().sum(axis=0)
+        # Compute per-row (timestep) normalizer: sum of absolute predicted returns
+        row_abs_sum = f_aligned.abs().sum(axis=1)
+
+        # To avoid division by zero if sum is zero for any row
+        row_abs_sum = row_abs_sum.replace(0, np.nan)
+
+        # Apply row-wise normalization
+        positions = f_aligned.div(row_abs_sum, axis=0) * j
+
+        # If you want to fill any potential NaNs (from zero division) with zero positions:
+        positions = positions.fillna(0)
 
     
     # STRATEGY 3: Only choose clusters with absolute returns above average
