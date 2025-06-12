@@ -7,45 +7,46 @@ from sklearn.linear_model import ElasticNet
 from signet.cluster import Cluster
 from sktime.forecasting.var_reduce import VARReduce
 from statsmodels.tsa.api import VAR
+from cpp_rls_filter import CppExpL1L2Regression
 
-class ExpL1L2Regression:
+# class ExpL1L2Regression:
 
-    def __init__(
-        self,
-        n: int,
-        w: np.ndarray,
-        lam: float = 0.1,
-        halflife: float = 20.0,
-        gamma: float = 0.01,
-        epsilon: float = 1e-6,
-    ):
-        self.n = n
-        self.lam = lam
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.beta = np.exp(np.log(0.5) / halflife)
-        self.w = w
-        self.P = np.diag(np.ones(self.n) * self.lam)
+#     def __init__(
+#         self,
+#         n: int,
+#         w: np.ndarray,
+#         lam: float = 0.1,
+#         halflife: float = 20.0,
+#         gamma: float = 0.01,
+#         epsilon: float = 1e-6,
+#     ):
+#         self.n = n
+#         self.lam = lam
+#         self.gamma = gamma
+#         self.epsilon = epsilon
+#         self.beta = np.exp(np.log(0.5) / halflife)
+#         self.w = w
+#         self.P = np.diag(np.ones(self.n) * self.lam)
 
-    def update(self, x: np.ndarray, y: float) -> None:
-        r = 1 + (x.T @ self.P @ x) / self.beta
-        k = (self.P @ x) / (r * self.beta)
-        e = y - x @ self.w
+#     def update(self, x: np.ndarray, y: float) -> None:
+#         r = 1 + (x.T @ self.P @ x) / self.beta
+#         k = (self.P @ x) / (r * self.beta)
+#         e = y - x @ self.w
 
-        k = k.reshape(-1, 1)
+#         k = k.reshape(-1, 1)
 
-        extra = (
-            self.gamma * ((self.beta - 1) / self.beta)
-            * (np.eye(self.n) - k @ self.w.reshape(1, -1))
-            @ self.P @ (np.sign(self.w) / (np.abs(self.w) + self.epsilon))
-        )
+#         extra = (
+#             self.gamma * ((self.beta - 1) / self.beta)
+#             * (np.eye(self.n) - k @ self.w.reshape(1, -1))
+#             @ self.P @ (np.sign(self.w) / (np.abs(self.w) + self.epsilon))
+#         )
 
-        self.w = self.w + k.flatten() * e + extra
+#         self.w = self.w + k.flatten() * e + extra
 
-        self.P = self.P / self.beta - (k @ k.T) * r
+#         self.P = self.P / self.beta - (k @ k.T) * r
 
-    def predict(self, x: np.ndarray) -> float:
-        return self.w @ x
+#     def predict(self, x: np.ndarray) -> float:
+#         return self.w @ x
 
 class NaiveVARForecaster:
     """
@@ -78,7 +79,7 @@ class NaiveVARForecaster:
         forecast_list = []
 
         ###################################################################################
-        ## See comments below -> Don't we need to update and do a "rolling window" fit?
+        ## See comments below -> Don't we need to update and do a "rolling window" fit? (yes, I think it's implemented)
         ###################################################################################
 
         for i in range(num_forecast_steps):
@@ -87,12 +88,6 @@ class NaiveVARForecaster:
             current_lag_order_used_iter = self.lag_order_used
             slice_end_point_for_var_fit = len(whole_data) - (num_forecast_steps - i - current_lag_order_used_iter)
             data_for_var_model_fit_iter = whole_data.iloc[:slice_end_point_for_var_fit]
-
-            # if cross_val:
-            #     model_cv = VAR(data_for_var_model_fit_iter.values)
-            #     current_results_iter = model_cv.fit(self.var_order)
-            #     current_lag_order_used_iter = current_results_iter.k_ar
-
             forecast_input = data_for_var_model_fit_iter.values[-current_lag_order_used_iter:]
             forecast_list.append(current_results_iter.forecast(y=forecast_input, steps=1))
 
@@ -340,20 +335,34 @@ class ClusterVARForecaster(NaiveVARForecaster):
         n_rls_inputs = params_matrix.shape[0]  # Number of regressors (constant + p*m)
         num_assets = params_matrix.shape[1]    # Number of assets/variables
 
-        rls_filters = [ExpL1L2Regression(n=n_rls_inputs, w=params_matrix.iloc[:, i].values) for i in range(num_assets)]
+        # rls_filters = [ExpL1L2Regression(n=n_rls_inputs, w=params_matrix.iloc[:, i].values) for i in range(num_assets)]
 
-        # We will loop for `num_forecast_steps` or until we run out of data.
+        # # We will loop for `num_forecast_steps` or until we run out of data.
+        # for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps - self.lag_order_used):
+        #     input_x = full_regressor_matrix[t]
+
+        #     # Predict first
+        #     forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
+
+        #     # then adapt
+        #     target_d_vector = whole_data.iloc[t].values
+        #     for j in range(num_assets):
+        #         # Adapt the j-th filter with the j-th target value
+        #         rls_filters[j].update(input_x, target_d_vector[j])
+        rls_filter = CppExpL1L2Regression(
+            initial_w=params_matrix.T, # Pass transposed weights (assets x features)
+            n_features=n_rls_inputs
+            # other params like lam, halflife, etc., can be passed here
+        )
+
         for t in range(forecast_start_idx, forecast_start_idx + num_forecast_steps - self.lag_order_used):
             input_x = full_regressor_matrix[t]
-
-            # Predict first
-            forecast_list.append([rls_filters[j].predict(input_x) for j in range(num_assets)])
-
-            # then adapt
+            # Predict for ALL assets in one go (calls C++ `predict`)
+            forecasts_at_t = rls_filter.predict(input_x)
+            forecast_list.append(forecasts_at_t)
+            # Adapt the filter for ALL assets in one go (calls C++ `update`)
             target_d_vector = whole_data.iloc[t].values
-            for j in range(num_assets):
-                # Adapt the j-th filter with the j-th target value
-                rls_filters[j].update(input_x, target_d_vector[j])
+            rls_filter.update(input_x, target_d_vector)
 
         forecast_array = np.array(forecast_list)
         forecast_index = pd.RangeIndex(start=0, stop=len(forecast_array), step=1)
