@@ -116,8 +116,10 @@ def plot_interwindow_errors(results_dict):
     # Create figure with 3 subplots
     fig, axs = plt.subplots(3, 1, figsize=(14, 12), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
 
+    flier_properties = dict(marker='o', markerfacecolor='red', markersize=3)
+
     # Subplot 1: RMSE boxplot
-    axs[0].boxplot(window_cluster_rmse, positions=window_ids, widths=0.6)
+    axs[0].boxplot(window_cluster_rmse, positions=window_ids, widths=0.6, flierprops=flier_properties)
     axs[0].set_ylabel("Cluster RMSE")
     axs[0].set_title("Cluster-wise Forecast RMSE per Window")
     axs[0].grid(True)
@@ -129,7 +131,7 @@ def plot_interwindow_errors(results_dict):
     # axs[1].grid(True)
 
     # Subplot 2: Relative RMSE boxplot
-    axs[1].boxplot(window_cluster_relative_rmse, positions=window_ids, widths=0.6)
+    axs[1].boxplot(window_cluster_relative_rmse, positions=window_ids, widths=0.6, flierprops=flier_properties)
     axs[1].set_ylabel("Relative RMSE")
     axs[1].set_title("Cluster-wise Normalized RMSE per Window")
     axs[1].grid(True)
@@ -192,8 +194,9 @@ def plot_inwindow_errors(results_dict):
     overall_mean_rmse = all_rmse.mean(axis=0)
 
     # Determine shared y-limits for boxplots
-    global_ymin = min(np.min(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count)
-    global_ymax = max(np.max(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count)
+    # Use np.nanmin and np.nanmax to safely handle NaN values
+    global_ymin = np.nanmin([np.nanmin(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count])
+    global_ymax = np.nanmax([np.nanmax(np.vstack(rmse_by_cluster_count[k])) for k in rmse_by_cluster_count])
 
     # ---------------------------------------------------------
     # Plot combined comparison + box-and-whiskers
