@@ -9,7 +9,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_returns(results_dict, convert_to_linear=False):
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_returns(results_dict, convert_to_linear=False, strategy="Unknown Strategy"):
     # Your data list
     data = results_dict['cluster_avg_pnl_list']
 
@@ -42,6 +45,11 @@ def plot_returns(results_dict, convert_to_linear=False):
         y_label_window = "Window Log Return"
         y_label_cumulative = "Cumulative Log Return"
 
+    # Compute Sharpe ratio for the entire trial (mean of all returns / std of all returns)
+    total_avg_return = np.mean(avg_pnls)  # Mean of all window returns
+    total_std_return = np.std(avg_pnls)  # Std of all window returns
+    sharpe_ratio = total_avg_return / total_std_return if total_std_return != 0 else 0
+
     # Create plot
     fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
 
@@ -49,7 +57,7 @@ def plot_returns(results_dict, convert_to_linear=False):
     ax1 = axs[0]
     line1 = ax1.plot(window_ids, avg_pnls_display, marker='o', label="Window Return")
     ax1.set_ylabel(y_label_window)
-    ax1.set_title("Window Return and Cumulative Return")
+    ax1.set_title(f"Window Return and Cumulative Return\nSharpe Ratio: {sharpe_ratio:.2f} | Strategy: {strategy}")
 
     # Second y-axis for cumulative return
     ax2 = ax1.twinx()
@@ -74,6 +82,7 @@ def plot_returns(results_dict, convert_to_linear=False):
     plt.tight_layout()
     plt.show()
     return
+
 
 
 
