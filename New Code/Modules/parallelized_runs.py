@@ -31,12 +31,17 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     if pnl_strategy=="top":
         [i,j]=f_aligned.shape
         positions=np.zeros((i,j))
-        for col in range(j):
-            absolute_val=f_aligned.iloc[:,col].abs()
-            mean_val=absolute_val.mean()
-            positions[:,col]=[value > mean_val for value in absolute_val]
 
-        pnl_per_period_per_asset = positions * a_aligned.abs()
+        for col in range(j):
+            f_col=f_aligned.iloc[:,col]
+            absolute_val=f_col.abs()
+            mean_val=absolute_val.mean()
+            positions_positive=[value > mean_val for value in f_col]
+            positions_negative=-1*[value < -1*mean_val for value in f_col]      
+            positions[:,col]=positions_positive + positions_negative
+            positions[:,col]=(i/np.abs(positions[:,col]).sum())*positions[:,col]
+
+        pnl_per_period_per_asset = positions * a_aligned
         total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
         return total_pnl_per_asset_or_cluster
         
