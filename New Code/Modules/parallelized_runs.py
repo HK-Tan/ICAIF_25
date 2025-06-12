@@ -24,20 +24,26 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
     # STRATEGY 2: Weight based on the predicted return of each cluster
     if pnl_strategy=="weighted":
         [i,j]=f_aligned.shape
-        positions = f_aligned*i / f_aligned.abs().sum()
+        positions = f_aligned*i / f_aligned.abs().sum(axis=0)
 
     
     # STRATEGY 3: Only choose clusters with absolute returns above average
     if pnl_strategy=="top":
         [i,j]=f_aligned.shape
         positions=np.zeros((i,j))
-        for col in range(j):
-            absolute_val=f_aligned[:,j].abs()
-            mean_val=absolute_val.mean()
-            positions[:,j]=[value > mean_val for value in absolute_val]
-            positions[:,j]=(i/positions[:,j].sum())*positions[:,j]
 
-        pnl_per_period_per_asset = positions * a_aligned.abs()
+        for col in range(j):
+            f_col=f_aligned.iloc[:,col]
+            absolute_val=f_col.abs()
+            mean_val=absolute_val.mean()
+            positions_positive=[value > mean_val for value in f_col]
+            positions_positive=[int(x) for x in positions_positive]
+            positions_negative=[value < -mean_val for value in f_col]
+            positions_negative=[int(x)-1 for x in positions_negative]
+            positions[:,col]=[x + y for x, y in zip(positions_positive, positions_negative)]
+            positions[:,col]=(i/np.abs(positions[:,col]).sum())*positions[:,col]
+
+        pnl_per_period_per_asset = positions * a_aligned
         total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
         return total_pnl_per_asset_or_cluster
         
@@ -160,7 +166,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
 def run_sliding_window_var_evaluation_vectorized(
     asset_returns_df, initial_lookback_len, eval_len, repetitions, n_clusters_config,
     cluster_method, var_order_config, sigma_intra_cluster, num_windows_config,
-    store_sample_forecasts=True, run_naive_var_comparison=True, max_threads=4
+    store_sample_forecasts=True, run_naive_var_comparison=True, max_threads=4, pnl_method="weighted"
 ):
     # Assumes asset_returns_df is valid, and total_T is sufficient for num_windows_config
     total_T, S = asset_returns_df.shape
@@ -202,10 +208,20 @@ def run_sliding_window_var_evaluation_vectorized(
                 for p_idx, p_val in enumerate(var_order_config):
                     # Assumes hyper_train_len > p_val
                     all_hyper_eval_tasks.append((
-                        i, hyper_train_df_tuple, hyper_eval_df_tuple,
-                        hyper_train_len, hyper_eval_len, asset_columns_list,
-                        k_val, cluster_method, p_val, sigma_intra_cluster,
-                        rep_idx, k_idx, p_idx
+                        i, 
+                        hyper_train_df_tuple, 
+                        hyper_eval_df_tuple,
+                        hyper_train_len, 
+                        hyper_eval_len, 
+                        asset_columns_list,
+                        k_val, 
+                        cluster_method, 
+                        p_val, 
+                        sigma_intra_cluster,
+                        rep_idx, 
+                        k_idx, 
+                        p_idx, 
+                        pnl_method
                     ))
 
     print(f"Phase 1: Running {len(all_hyper_eval_tasks)} hyperparameter PNL calculations in parallel...")
@@ -239,10 +255,19 @@ def run_sliding_window_var_evaluation_vectorized(
         store_sample_flag = store_sample_forecasts and (i == num_actual_windows - 1)
 
         all_final_eval_tasks.append((
-            i, lookback_tuple, eval_tuple,
-            initial_lookback_len, eval_len, asset_columns_list,
-            best_n_clusters, best_var_order, cluster_method, sigma_intra_cluster,
-            run_naive_var_comparison, store_sample_flag
+            i, 
+            lookback_tuple, 
+            eval_tuple,
+            initial_lookback_len, 
+            eval_len, 
+            asset_columns_list,
+            best_n_clusters, 
+            best_var_order, 
+            cluster_method, 
+            sigma_intra_cluster,
+            run_naive_var_comparison, 
+            store_sample_flag, 
+            pnl_method
         ))
 
     print(f"Phase 2: Running {len(all_final_eval_tasks)} final window evaluations in parallel...")
