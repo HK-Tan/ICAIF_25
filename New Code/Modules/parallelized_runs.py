@@ -32,7 +32,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
         [i,j]=f_aligned.shape
         positions=np.zeros((i,j))
         for col in range(j):
-            absolute_val=f_aligned[:,col].abs()
+            absolute_val=f_aligned.iloc[:,col].abs()
             mean_val=absolute_val.mean()
             positions[:,col]=[value > mean_val for value in absolute_val]
 
