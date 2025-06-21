@@ -71,6 +71,7 @@ def make_lags_with_orginal(df, p):
     return pd.concat([df, lagged_df], axis=1)
 
 def realign(Y,T,W):
+    # Remind me to check again
     full = pd.concat([Y, T, W], axis=1).dropna()
     Y_cols = Y.columns
     T_cols = T.columns
@@ -117,7 +118,7 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
 To-do: Push the starting days, check if the indices make sense
 """
     
-def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
+def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                         p_max=5,  # maximum number of lags
                                         model_y_name='extra_trees',
                                         model_t_name='extra_trees',
@@ -157,7 +158,7 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
 
     Inputs: 
 
-    Y_df: DataFrame of asset returns (outcome variable)
+    asset_df: DataFrame of asset returns (outcome variable)
     confound_df: DataFrame of confounding variables (confounding variables)
     p_max: A hyperparameter representing the maximum number of lags to consider (e.g. 5).
     model_y_name: Name of the regressor to use for the outcome variable (e.g. 'extra_trees').
@@ -185,12 +186,13 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
 
     
     test_start = lookback_days  # Start of the test set after training and validation
-    num_days = Y_df.shape[0] - 1  # Total number of days in the dataset, 
+    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset, 
                                   # minus one day off since we cannot train on the last day
     p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
-    Y_hat_next_store = np.zeros((num_days - test_start, Y_df.shape[1]))
+    Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
+    #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
-    if len(Y_df) < lookback_days + 1 or lookback_days <= days_valid:
+    if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
         raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
 
     for day_idx in range(test_start, num_days):
@@ -214,9 +216,9 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
 
                 # Create lagged treatment variables
                 # Recall that columns are days, and rows are tickers
-                T_df_lagged = Y_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
+                Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
                 W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
-                Y_df_lagged = make_lags(T_df_lagged, p)
+                T_df_lagged = make_lags(Y_df_lagged, p)
                 Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
                 Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
                 Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
@@ -251,19 +253,19 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
                 else:
                     raise ValueError("Unsupported error metric.")
             valid_errors.append( (p,current_error) )
+        print("Validation errors for different p values:", valid_errors)
         p_opt = min(valid_errors, key=lambda x: x[1])[0]  # Get the p with the minimum validation error 
         p_optimal[day_idx - test_start] = p_opt  # Store the optimal p for this day
 
         # Once we have determined the optimal p value, we now fit with "today's" data set
         # Terminal start_idx = 19
         # Terminal end_idx = 1008 (from results of previous loop at the end of the loop for valid)
-        T_df_lagged = Y_df.iloc[start_idx:end_idx+1,:].copy()  # 19:1009, but 1009 is excluded, so 1008 is the "test" element
-        W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx+1,:], p)
-        Y_df_lagged = make_lags(T_df_lagged, p)
+        Y_df_lagged = asset_df.iloc[start_idx:end_idx+1,:].copy()  # 19:1009, but 1009 is excluded, so 1008 is the "test" element
+        W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx+1,:], p_opt)
+        T_df_lagged = make_lags(Y_df_lagged, p_opt)
         Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
         Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
         Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-        
         est = LinearDML(
             model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
             model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
@@ -281,7 +283,6 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
             # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
             pred = model.predict(W_df_test)
             Y_base_folds.append(pred)
-        
         Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds 
         theta = est.const_marginal_ate()
         Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
@@ -294,3 +295,62 @@ def rolling_window_OR_VAR_w_para_search(Y_df, confound_df,
     }
 
     return result
+
+
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=False):
+    """
+    This function calculates the PnL based on the forecasted returns and actual returns.
+
+    Inputs:
+    forecast_df: DataFrame containing the forecasted returns for each asset/cluster.
+    actual_df: DataFrame containing the actual returns for each asset/cluster (in terms of log returns).
+    pnl_strategy: Strategy for calculating PnL. Options are:
+        - "naive": Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return.
+        - "weighted": Weight based on the predicted return of each cluster.
+        - "top": Only choose clusters with absolute returns above average.
+    contrarian: If True, inverts the trading signals (bets against forecasts).
+
+    Remark:
+    The dataframes keep daily data as rows, with columns as different assets or clusters. 
+    We also assume that these df are aligned.
+    
+    Output:
+    Returns a Series with total PnL for each asset/cluster over the entire period.
+    """
+    
+    # Convert log returns to simple returns for a "factor"
+    simple_returns = np.exp(actual_df)
+    
+    # Set trading direction: -1 for contrarian, 1 for normal
+    direction = -1 if contrarian else 1
+    
+    if pnl_strategy == "naive":
+        raw_positions = direction * np.sign(forecast_df)
+        # Normalize so absolute positions sum to 1 each day
+        row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
+        positions = raw_positions.div(row_abs_sum, axis=0)
+    
+    elif pnl_strategy == "weighted":
+        row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
+        positions = direction * forecast_df.div(row_abs_sum, axis=0)
+    
+    elif pnl_strategy == "top":
+        positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
+        
+        for col in forecast_df.columns:
+            threshold = forecast_df[col].abs().mean()
+            positions.loc[forecast_df[col] > threshold, col] = direction
+            positions.loc[forecast_df[col] < -threshold, col] = -direction
+        
+        row_sums = positions.abs().sum(axis=1).replace(0, 1)
+        positions = positions.div(row_sums, axis=0)
+    
+    # Calculate daily portfolio returns
+    daily_pnl = positions * simple_returns
+    daily_portfolio_returns = daily_pnl.sum(axis=1)
+    
+    # CORRECT: Compound the returns
+    #cumulative_returns = daily_portfolio_returns.cumprod() - 1
+    cumulative_returns = (daily_portfolio_returns.cumsum())/ len(daily_portfolio_returns)
+
+    return cumulative_returns
