@@ -3,69 +3,44 @@ import numpy as np
 import multiprocessing
 from ClusterVARForecast import ClusterVARForecaster, NaiveVARForecaster
 
-def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted"):
-    # Assumes forecast_df and actual_df are valid, have common columns, and alignable indices
-    common_cols = forecast_df.columns.intersection(actual_df.columns)
-    f_aligned, a_aligned = forecast_df[common_cols].copy(), actual_df[common_cols].copy()
-
-    f_aligned.reset_index(drop=True, inplace=True)
-    a_aligned.reset_index(drop=True, inplace=True)
-
-    min_len = min(len(f_aligned), len(a_aligned))
-    f_aligned = f_aligned.iloc[:min_len]
-    a_aligned = a_aligned.iloc[:min_len]
 
 
-    # STRATEGY 1: Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return
-    if pnl_strategy=="naive":
-        positions = -1 * np.sign(f_aligned)
-     
+
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=False):
+
+    # Convert log returns to simple returns
+    simple_returns = np.exp(actual_df)
     
-    # STRATEGY 2: Weight based on the predicted return of each cluster
-    if pnl_strategy=="weighted":
-        [i,j]=f_aligned.shape
-        # Compute per-row (timestep) normalizer: sum of absolute predicted returns
-        row_abs_sum = f_aligned.abs().sum(axis=1)
-
-        # To avoid division by zero if sum is zero for any row
-        row_abs_sum = row_abs_sum.replace(0, np.nan)
-
-        # Apply row-wise normalization
-        positions = f_aligned.div(row_abs_sum, axis=0) * j
-
-        # If you want to fill any potential NaNs (from zero division) with zero positions:
-        positions = -1 * positions.fillna(0)
-
+    # Set trading direction: -1 for contrarian, 1 for normal
+    direction = -1 if contrarian else 1
     
-    # STRATEGY 3: Only choose clusters with absolute returns above average
-    if pnl_strategy=="top":
-        [i,j]=f_aligned.shape
-        positions=np.zeros((i,j))
-
-        for col in range(j):
-            f_col=f_aligned.iloc[:,col]
-            absolute_val=f_col.abs()
-            mean_val=absolute_val.mean()
-            positions_positive=[value > mean_val for value in f_col]
-            positions_positive=[int(x) for x in positions_positive]
-            positions_negative=[value < -mean_val for value in f_col]
-            positions_negative=[int(x)-1 for x in positions_negative]
-            positions[:,col]=[x + y for x, y in zip(positions_positive, positions_negative)]
-            positions[:,col]=-1 * (i/np.abs(positions[:,col]).sum())*positions[:,col]
-
-        pnl_per_period_per_asset = positions * a_aligned
-        total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
-        return total_pnl_per_asset_or_cluster
+    if pnl_strategy == "naive":
+        raw_positions = direction * np.sign(forecast_df)
+        # Normalize so absolute positions sum to 1 each day
+        row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
+        positions = raw_positions.div(row_abs_sum, axis=0)
+    
+    elif pnl_strategy == "weighted":
+        row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
+        positions = direction * forecast_df.div(row_abs_sum, axis=0)
+    
+    elif pnl_strategy == "top":
+        positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
         
-  
-
-    pnl_per_period_per_asset = positions * a_aligned
-    total_pnl_per_asset_or_cluster = pnl_per_period_per_asset.sum(axis=0)
-    return total_pnl_per_asset_or_cluster
-
+        for col in forecast_df.columns:
+            threshold = forecast_df[col].abs().mean()
+            positions.loc[forecast_df[col] > threshold, col] = direction
+            positions.loc[forecast_df[col] < -threshold, col] = -direction
+        
+        row_sums = positions.abs().sum(axis=1).replace(0, 1)
+        positions = positions.div(row_sums, axis=0)
     
+    # Calculate daily PnL using simple returns
+    daily_pnl = positions * simple_returns
     
-
+    # Return cumulative PnL over time (tracking accumulation each day)
+    return daily_pnl.sum(axis=1)
+    
 
 
 def _process_single_hyper_eval_task(args_bundle):
@@ -119,7 +94,7 @@ def _process_single_hyper_eval_task(args_bundle):
     )
 
     pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
-    avg_pnl_cluster = pnl_series_cluster.mean() # Assumes pnl_series_cluster is not empty
+    avg_pnl_cluster = pnl_series_cluster.prod(axis=0) # Assumes pnl_series_cluster is not empty
 
     pnl = avg_pnl_cluster # This was the return of _hyperparameter_search_worker
 
@@ -147,7 +122,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
     true_eval_returns_cluster = cluster_forecaster._calculate_weighted_cluster_returns(eval_df, (0, E_window))
     forecasted_returns_cluster = cluster_forecaster._forecast(true_eval_returns_cluster, forecast_horizon, cross_val=False)
     pnl_series_cluster = calculate_pnl(forecasted_returns_cluster, true_eval_returns_cluster, pnl_method)
-    avg_pnl_cluster = pnl_series_cluster.mean()
+    avg_pnl_cluster = pnl_series_cluster.prod(axis=0)
 
     forecast_data_cluster_sample, actual_data_cluster_sample = None, None
     
@@ -168,7 +143,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
         forecasted_returns_naive = naive_forecaster._forecast(eval_df, forecast_horizon, cross_val=False)
         forecasted_returns_naive = forecasted_returns_naive.reindex(columns=eval_df.columns, fill_value=np.nan)
         pnl_series_naive = calculate_pnl(forecasted_returns_naive, eval_df, pnl_method)
-        avg_pnl_naive = pnl_series_naive.mean()
+        avg_pnl_naive = pnl_series_naive.prod(axis=0)
 
     return window_idx, avg_pnl_cluster, avg_pnl_naive, float(best_n_clusters), float(best_var_order), \
            forecast_data_cluster_sample, actual_data_cluster_sample

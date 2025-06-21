@@ -7,7 +7,7 @@ from sklearn.linear_model import ElasticNet
 from signet.cluster import Cluster
 from sktime.forecasting.var_reduce import VARReduce
 from statsmodels.tsa.api import VAR
-#from cpp_rls_filter import CppExpL1L2Regression
+from cpp_rls_filter import CppExpL1L2Regression
 
 # class ExpL1L2Regression:
 
