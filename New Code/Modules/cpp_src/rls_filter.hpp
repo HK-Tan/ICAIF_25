@@ -22,7 +22,7 @@ public:
         beta_param = 1.0; // std::exp(std::log(0.5) / halflife);
         // Initialize the stack of P matrices
         P.reserve(num_assets);
-        Eigen::MatrixXd p_initial = Eigen::MatrixXd::Identity(n_features, n_features) / lam;
+        Eigen::MatrixXd p_initial = Eigen::MatrixXd::Identity(n_features, n_features) * lam;
         for (int i = 0; i < num_assets; ++i) {
             P.push_back(p_initial);
         }
