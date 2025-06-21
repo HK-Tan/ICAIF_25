@@ -39,7 +39,9 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=Fa
     daily_pnl = positions * simple_returns
     
     # Return cumulative PnL over time (tracking accumulation each day)
+    # return np.array([2,2])
     return daily_pnl.sum(axis=1)
+    
     
 
 
@@ -261,48 +263,33 @@ def run_sliding_window_var_evaluation_vectorized(
         # [result.wait() for result in final_results_list]
     print("Phase 2: Final window evaluations completed.")
 
-    all_window_pnl_cluster_list, all_window_pnl_naive_list = [], []
-    sample_forecast_data_cluster, sample_actual_data_cluster, sample_window_idx_cluster = None, None, None
 
-    cluster_return_forecasts_list = []
-    cluster_return_actual_list = []
+
+    # all_window_pnl_cluster_list, all_window_pnl_naive_list = [], []
+    # sample_forecast_data_cluster, sample_actual_data_cluster, sample_window_idx_cluster = None, None, None
+
+    # cluster_return_forecasts_list = []
+    # cluster_return_actual_list = []
     
+    pnls = []
+
     for i, result_tuple in enumerate(final_results_list):
         win_idx, pnl_c, pnl_n, n_c_sel, vo_sel, forecast_returns, actual_returns = result_tuple
 
-        all_window_pnl_cluster_list.append({ # Assumes pnl_c is a valid number
-            'Window_ID': win_idx, 'Avg_Window_PNL': pnl_c,
-            'N_Clusters': int(n_c_sel), 'VAR_Order': int(vo_sel), 'Method': 'Clustered VAR'
-        })
-        if run_naive_var_comparison: # Assumes pnl_n is a valid number if run
-            all_window_pnl_naive_list.append({
-                'Window_ID': win_idx, 'Avg_Window_PNL': pnl_n,
-                'VAR_Order': int(vo_sel), 'Method': 'Naive VAR'
-            })
+        pnls.append(pnl_c)
 
-        if store_sample_forecasts and (win_idx == num_actual_windows - 1):
-            # Assumes forecast_returns and actual_returns are valid if this condition is met
-             sample_forecast_data_cluster = forecast_returns
-             sample_actual_data_cluster = actual_returns
-             sample_window_idx_cluster = win_idx
-        
-        # print(i)
-        cluster_return_forecasts_list.append(forecast_returns.copy())
-        cluster_return_actual_list.append(actual_returns.copy())
+    return pnls
 
+    # results_dict = {
+    #     'cluster_avg_pnl_list': all_window_pnl_cluster_list,
+    #     'sample_forecast_cluster': sample_forecast_data_cluster,
+    #     'sample_actual_cluster': sample_actual_data_cluster,
+    #     'sample_window_idx_cluster': sample_window_idx_cluster,
+    #     'per_cluster_forecasted_return':cluster_return_forecasts_list,
+    #     'per_cluster_actual_return':cluster_return_actual_list,
+    # }
+    # if run_naive_var_comparison:
+    #     results_dict['naive_avg_pnl_list'] = all_window_pnl_naive_list
 
-
-
-    results_dict = {
-        'cluster_avg_pnl_list': all_window_pnl_cluster_list,
-        'sample_forecast_cluster': sample_forecast_data_cluster,
-        'sample_actual_cluster': sample_actual_data_cluster,
-        'sample_window_idx_cluster': sample_window_idx_cluster,
-        'per_cluster_forecasted_return':cluster_return_forecasts_list,
-        'per_cluster_actual_return':cluster_return_actual_list,
-    }
-    if run_naive_var_comparison:
-        results_dict['naive_avg_pnl_list'] = all_window_pnl_naive_list
-
-    print("All processing finished.")
-    return results_dict
+    # print("All processing finished.")
+    # return results_dict
