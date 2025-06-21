@@ -14,43 +14,42 @@ import matplotlib.pyplot as plt
 
 ####################################### PNL ########################################
 
-def plot_returns(results_dict, convert_to_linear=False, strategy="Unknown Strategy"):
+def plot_returns(results_dict, strategy="Unknown Strategy"):
     # Your data list
     data = results_dict['cluster_avg_pnl_list']
 
     # Extract fields
     window_ids = [d['Window_ID'] for d in data]
-    avg_pnls_log = [d['Avg_Window_PNL'] for d in data]
+    avg_pnls = [d['Avg_Window_PNL'] for d in data]
     n_clusters = [d['N_Clusters'] for d in data]
     var_orders = [d['VAR_Order'] for d in data]
 
-    if convert_to_linear:
-        # Convert log returns to linear returns
-        avg_pnls = [np.exp(r) - 1 for r in avg_pnls_log]
-        cumulative_returns = np.cumprod([1 + r for r in avg_pnls]) - 1
+    # if convert_to_linear:
+    # Convert log returns to linear returns
+    cumulative_returns = np.cumprod([r for r in avg_pnls]) - 1
 
-        # Report linear returns in basis points
-        avg_pnls_display = [r * 10000 for r in avg_pnls]
-        cumulative_returns_display = cumulative_returns * 10000
+    # Report linear returns in basis points
+    avg_pnls_display = [(r-1) * 10000 for r in avg_pnls]
+    cumulative_returns_display = cumulative_returns * 10000
 
-        y_label_window = "Window Return (bps)"
-        y_label_cumulative = "Cumulative Return (bps)"
-    else:
-        # Keep log returns directly
-        avg_pnls = avg_pnls_log
-        cumulative_returns = np.cumsum(avg_pnls_log)
+    y_label_window = "Window Return (bps)"
+    y_label_cumulative = "Cumulative Return (bps)"
+    # else:
+    #     # Keep log returns directly
+    #     avg_pnls = avg_pnls_log
+    #     cumulative_returns = np.cumsum(avg_pnls_log)
 
-        # Report log returns as-is (unitless)
-        avg_pnls_display = avg_pnls
-        cumulative_returns_display = cumulative_returns
+    #     # Report log returns as-is (unitless)
+    #     avg_pnls_display = avg_pnls
+    #     cumulative_returns_display = cumulative_returns
 
-        y_label_window = "Window Log Return"
-        y_label_cumulative = "Cumulative Log Return"
+    #     y_label_window = "Window Log Return"
+    #     y_label_cumulative = "Cumulative Log Return"
 
     # Compute Sharpe ratio for the entire trial (mean of all returns / std of all returns)
     total_avg_return = np.mean(avg_pnls)  # Mean of all window returns
     total_std_return = np.std(avg_pnls)  # Std of all window returns
-    sharpe_ratio = total_avg_return / total_std_return if total_std_return != 0 else 0
+    sharpe_ratio = total_avg_return * np.sqrt(252) / total_std_return if total_std_return != 0 else 0
 
     # Create plot
     fig, axs = plt.subplots(2, 1, figsize=(24, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
