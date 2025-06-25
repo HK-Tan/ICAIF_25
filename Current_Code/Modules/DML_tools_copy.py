@@ -14,6 +14,7 @@ from scipy import sparse
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
+from tqdm import tqdm
 
 try:
     from statsmodels.stats.multitest import multipletests
@@ -131,7 +132,6 @@ def calculate_weighted_cluster_portfolio_returns(
     # Assuming 'Cluster' is an external class with a 'SPONGE_sym' method
     cluster_obj = Cluster(signet_data)
     labels = cluster_obj.SPONGE_sym(effective_n_clusters)
-    asset_names = asset_returns_lookback_df.columns
 
     # --- 3. Calculate Centroids, Weights, and Returns (Vectorized) ---
 
@@ -142,7 +142,7 @@ def calculate_weighted_cluster_portfolio_returns(
     # Create a DataFrame aligned with original returns, where each column is the
     # appropriate centroid for that asset. This prepares for vectorized subtraction.
     aligned_centroids_df = centroids_df.iloc[:, labels]
-    aligned_centroids_df.columns = asset_names
+    aligned_centroids_df.columns = asset_returns_lookback_df.columns
 
     # Calculate squared Euclidean distance between each asset and its centroid (all at once)
     squared_distances = ((asset_returns_lookback_df - aligned_centroids_df)**2).sum(axis=0)
@@ -161,7 +161,7 @@ def calculate_weighted_cluster_portfolio_returns(
     cluster_returns_df = weighted_asset_returns.T.groupby(labels).sum().T
 
     # Rename columns for clarity, matching the original function's output format
-    cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
+    # cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
 
     return cluster_returns_df
 
@@ -200,6 +200,31 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
         return MultiOutputRegressor(base_model)
     else:
         return base_model
+
+def fit_and_predict(Y_df_lagged, W_df_lagged, p, model_y_name, model_y_params, model_t_name, model_t_params, cv_folds):
+    T_df_lagged = make_lags(Y_df_lagged, p)
+    Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
+    Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
+    est = LinearDML(
+        model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+        model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+        cv=TimeSeriesSplit(n_splits=cv_folds),
+        discrete_treatment=False,
+        random_state=0
+    )
+    est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
+
+    # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
+
+    # The structure is: est.models_y[0] contains the 5 CV fold models
+    Y_base_folds = []
+    for model in est.models_y[0]:
+        # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
+        pred = model.predict(W_df_test)
+        Y_base_folds.append(pred)
+    Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
+    theta = est.const_marginal_ate()
+    return Y_base + T_df_test @ theta.T
 
 """
 To-do: Push the starting days, check if the indices make sense
@@ -280,7 +305,9 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
     Y_hat_next_store = np.zeros((num_days - test_start, k))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
-    for day_idx in range(test_start, num_days):
+    asset_df = calculate_weighted_cluster_portfolio_returns(lookback_df, k, .01)
+
+    for day_idx in tqdm(range(test_start, num_days)):
         # The ccomments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
         print("It is day", day_idx, "out of", num_days, "days in the dataset.")
         # First, we perform a parameter search for the optimal p.
@@ -290,8 +317,6 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
         valid_end = valid_start + days_valid - 1        # e.g. 988 + 20 - 1 = 1007; total length = 20
 
         valid_errors = []
-
-        asset_df = calculate_weighted_cluster_portfolio_returns(lookback_df, k, .01)
 
         for p in range(1, p_max + 1):
             current_error = 0
@@ -306,34 +331,17 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
                 # Recall that columns are days, and rows are tickers
                 Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
                 W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
-                T_df_lagged = make_lags(Y_df_lagged, p)
-                Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-                Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-                Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-                # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for
-                #  validation, so we have 19:1006 (1006 included) for training and 1007 for "internal validation".
-
-                est = LinearDML(
-                    model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-                    model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-                    cv=TimeSeriesSplit(n_splits=cv_folds),
-                    discrete_treatment=False,
-                    random_state=0
+                Y_hat_next = fit_and_predict(
+                    Y_df_lagged,
+                    W_df_lagged,
+                    p,
+                    model_y_name,
+                    model_y_params,
+                    model_t_name,
+                    model_t_params,
+                    cv_folds
                 )
-                est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-                # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-                # The structure is: est.models_y[0] contains the 5 CV fold models
-                Y_base_folds = []
-                for model in est.models_y[0]:
-                    # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-                    pred = model.predict(W_df_test)
-                    Y_base_folds.append(pred)
-
-                Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-                theta = est.const_marginal_ate()
-                Y_hat_next = Y_base + T_df_test @ theta.T
+                Y_df_test = Y_df_lagged.iloc[-1:,:]
 
                 # Obtain error in the desired metric and accumulate it over the validation window
                 if error_metric == 'rmse':
@@ -350,30 +358,16 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
         # Terminal end_idx = 1008 (from results of previous loop at the end of the loop for valid)
         Y_df_lagged = asset_df.iloc[start_idx:end_idx+1,:].copy()  # 19:1009, but 1009 is excluded, so 1008 is the "test" element
         W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx+1,:], p_opt)
-        T_df_lagged = make_lags(Y_df_lagged, p_opt)
-        Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-        Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-        est = LinearDML(
-            model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-            model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-            cv=TimeSeriesSplit(n_splits=cv_folds),
-            discrete_treatment=False,
-            random_state=0
+        Y_hat_next_store[day_idx-test_start,:] = fit_and_predict(
+            Y_df_lagged,
+            W_df_lagged,
+            p_opt,
+            model_y_name,
+            model_y_params,
+            model_t_name,
+            model_t_params,
+            cv_folds
         )
-        est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-        # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-        # The structure is: est.models_y[0] contains the 5 CV fold models
-        Y_base_folds = []
-        for model in est.models_y[0]:
-            # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-            pred = model.predict(W_df_test)
-            Y_base_folds.append(pred)
-        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-        theta = est.const_marginal_ate()
-        Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
 
     result = {
         'test_start': test_start,
