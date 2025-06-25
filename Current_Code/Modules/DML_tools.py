@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
 
-from parallelized_runs import calculate_pnl
+# from parallelized_runs import calculate_pnl
 
 # Helper function to make lagged copies of a DataFrame
 def make_lags(df, p):
