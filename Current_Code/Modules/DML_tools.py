@@ -12,6 +12,7 @@ try:
 except ImportError:
     print("Signet package not found. Attempting to install from GitHub...")
     try:
+        import sys
         import subprocess
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"]
@@ -33,7 +34,7 @@ from econml.dml import LinearDML, SparseLinearDML
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor
 from sklearn.model_selection import TimeSeriesSplit, train_test_split
 from sklearn.metrics import root_mean_squared_error
-from sklearn.multioutput import MultiOutputRegressor 
+from sklearn.multioutput import MultiOutputRegressor
 from sklearn.base import clone
 from sklearn.linear_model import Lasso
 import matplotlib.pyplot as plt
@@ -46,7 +47,7 @@ from parallelized_runs import calculate_pnl
 def make_lags(df, p):
     """
     Create lagged copies of a DataFrame.
-    
+
     Parameters:
     df (pd.DataFrame): The input DataFrame.
     p (int): The number of lags to create.
@@ -59,11 +60,11 @@ def make_lags(df, p):
 def make_lags_with_orginal(df, p):
     """
     Create lagged copies of a DataFrame and include the original columns.
-    
+
     Parameters:
     df (pd.DataFrame): The input DataFrame.
     p (int): The number of lags to create.
-    
+
     Returns:
     pd.DataFrame: A DataFrame with the original columns and the lagged columns.
     """
@@ -105,19 +106,19 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
             random_state=kwargs.get('random_state', 0)
         )
     }
-    
+
     base_model = base_regressors[regressor_name]
-    
+
     # For Y model (multiple outputs), we might need MultiOutputRegressor
     if force_multioutput:
         return MultiOutputRegressor(base_model)
     else:
         return base_model
-    
+
 """
 To-do: Push the starting days, check if the indices make sense
 """
-    
+
 def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                         p_max=5,  # maximum number of lags
                                         model_y_name='extra_trees',
@@ -130,33 +131,33 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                         error_metric='rmse'):
     """
     THe purpose of this function is to run a rolling window evaluation
-    using OR-VAR. The idea is that we will always run this via orthongalized regression 
-    framework under DML. However, to determine the optimal value of p, we will run a 
+    using OR-VAR. The idea is that we will always run this via orthongalized regression
+    framework under DML. However, to determine the optimal value of p, we will run a
     "hyperparameter"-like search over the lookback window (to prevent look-ahead bias).
 
     This is best illustrated with a concrete example:
 
     Suppose we have a lookback window of 252*4 days (i.e. 4 years of daily data). For a fixed p,
-    the base model between the "treatment" and the "outcome" follows a linear relationship (under LinearDML), 
-    and hence would be compututationally cheap to run. Coupled with machine learning methods for non-linear 
-    relationships that runs fast (ie ExtraTreesRegressor), it makes it computationally feasible to 
+    the base model between the "treatment" and the "outcome" follows a linear relationship (under LinearDML),
+    and hence would be compututationally cheap to run. Coupled with machine learning methods for non-linear
+    relationships that runs fast (ie ExtraTreesRegressor), it makes it computationally feasible to
     refresh our DML coefficients every day.
 
-    Henceforth, we now split the lookback window into a training and a validation set. For instance, we can set 
-    aside one month (~20 days) worth of data as a validation set, and use the rest as training data. 
+    Henceforth, we now split the lookback window into a training and a validation set. For instance, we can set
+    aside one month (~20 days) worth of data as a validation set, and use the rest as training data.
     This means that for each value of p, we train on the training set, obtain the validation errors on the validation set,
     and pick the value of p that minimizes the validation error. The validation error used here could either be
     the RSME or the PnL, depending on the use case.
 
-    Remark 1: As part of a potential extension, it is possible to also incorporate an extra parameter/hyperparameter 
-    for the number of clusters if we are using clustering methods as a dimensionality reduction technique. 
+    Remark 1: As part of a potential extension, it is possible to also incorporate an extra parameter/hyperparameter
+    for the number of clusters if we are using clustering methods as a dimensionality reduction technique.
     Alternatively, one could also have k to represent the top-k assets instead (top by market cap, etc).
 
     Remark 2: We are assuming the absence of a hyperparameter here. One could technically add more hyperparameters
-    like the size of lookback window, days_valid, etc. However, this would make the search space too large and 
+    like the size of lookback window, days_valid, etc. However, this would make the search space too large and
     computationally expensive to run while overfitting the model. Hence, we will not do that here.
 
-    Inputs: 
+    Inputs:
 
     asset_df: DataFrame of asset returns (outcome variable)
     confound_df: DataFrame of confounding variables (confounding variables)
@@ -166,7 +167,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     model_y_params: Dictionary of parameters for the outcome regressor.
     model_t_params: Dictionary of parameters for the treatment regressor.
     cv_folds: Number of cross-validation folds to use.
-    lookback_days: Number of days to use for the lookback window 
+    lookback_days: Number of days to use for the lookback window
         (e.g. 252*4; assume that this is valid ie data set has more than 4 years worth of daily data).
     days_valid: Number of days to use for validation (e.g. 20; assume that this is less than lookback_days).
     error_metric: Metric to use for validation (e.g. 'rmse' or 'pnl').
@@ -175,18 +176,18 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     test_start: The starting index of the test set.
     num_days: The total number of days in the dataset.
-    p_optimal: The optimal value of p that minimizes the validation error at the end of the lookback window, 
+    p_optimal: The optimal value of p that minimizes the validation error at the end of the lookback window,
         for each day (hence be a vector of length num_days - test_start).
     """
-        
+
     if model_y_params is None:
         model_y_params = {}
     if model_t_params is None:
         model_t_params = {}
 
-    
+
     test_start = lookback_days  # Start of the test set after training and validation
-    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset, 
+    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
     p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
     Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
@@ -222,9 +223,9 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                 Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
                 Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
                 Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-                # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for 
+                # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for
                 #  validation, so we have 19:1006 (1006 included) for training and 1007 for "internal validation".
-                
+
                 est = LinearDML(
                     model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
                     model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
@@ -235,18 +236,18 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                 est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
 
                 # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-                
+
                 # The structure is: est.models_y[0] contains the 5 CV fold models
                 Y_base_folds = []
-                for model in est.models_y[0]:  
+                for model in est.models_y[0]:
                     # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
                     pred = model.predict(W_df_test)
                     Y_base_folds.append(pred)
-                
-                Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds 
+
+                Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
                 theta = est.const_marginal_ate()
                 Y_hat_next = Y_base + T_df_test @ theta.T
-                
+
                 # Obtain error in the desired metric and accumulate it over the validation window
                 if error_metric == 'rmse':
                         current_error += root_mean_squared_error(Y_df_test, Y_hat_next)
@@ -254,7 +255,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                     raise ValueError("Unsupported error metric.")
             valid_errors.append( (p,current_error) )
         print("Validation errors for different p values:", valid_errors)
-        p_opt = min(valid_errors, key=lambda x: x[1])[0]  # Get the p with the minimum validation error 
+        p_opt = min(valid_errors, key=lambda x: x[1])[0]  # Get the p with the minimum validation error
         p_optimal[day_idx - test_start] = p_opt  # Store the optimal p for this day
 
         # Once we have determined the optimal p value, we now fit with "today's" data set
@@ -276,14 +277,14 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
 
         # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-        
+
         # The structure is: est.models_y[0] contains the 5 CV fold models
         Y_base_folds = []
-        for model in est.models_y[0]:  
+        for model in est.models_y[0]:
             # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
             pred = model.predict(W_df_test)
             Y_base_folds.append(pred)
-        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds 
+        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
         theta = est.const_marginal_ate()
         Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
 
@@ -311,44 +312,44 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=Fa
     contrarian: If True, inverts the trading signals (bets against forecasts).
 
     Remark:
-    The dataframes keep daily data as rows, with columns as different assets or clusters. 
+    The dataframes keep daily data as rows, with columns as different assets or clusters.
     We also assume that these df are aligned.
-    
+
     Output:
     Returns a Series with total PnL for each asset/cluster over the entire period.
     """
-    
+
     # Convert log returns to simple returns for a "factor"
     simple_returns = np.exp(actual_df)
-    
+
     # Set trading direction: -1 for contrarian, 1 for normal
     direction = -1 if contrarian else 1
-    
+
     if pnl_strategy == "naive":
         raw_positions = direction * np.sign(forecast_df)
         # Normalize so absolute positions sum to 1 each day
         row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
         positions = raw_positions.div(row_abs_sum, axis=0)
-    
+
     elif pnl_strategy == "weighted":
         row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
         positions = direction * forecast_df.div(row_abs_sum, axis=0)
-    
+
     elif pnl_strategy == "top":
         positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
-        
+
         for col in forecast_df.columns:
             threshold = forecast_df[col].abs().mean()
             positions.loc[forecast_df[col] > threshold, col] = direction
             positions.loc[forecast_df[col] < -threshold, col] = -direction
-        
+
         row_sums = positions.abs().sum(axis=1).replace(0, 1)
         positions = positions.div(row_sums, axis=0)
-    
+
     # Calculate daily portfolio returns
     daily_pnl = positions * simple_returns
     daily_portfolio_returns = daily_pnl.sum(axis=1)
-    
+
     # CORRECT: Compound the returns
     #cumulative_returns = daily_portfolio_returns.cumprod() - 1
     cumulative_returns = (daily_portfolio_returns.cumsum())/ len(daily_portfolio_returns)
