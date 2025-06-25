@@ -8,7 +8,24 @@ from sklearn.metrics import root_mean_squared_error
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.base import clone
 from sklearn.linear_model import Lasso
-from statsmodels.stats.multitest import multipletests
+import scipy.stats as st
+from scipy.stats import norm
+from scipy import sparse
+import matplotlib.pyplot as plt
+from matplotlib.dates import DateFormatter
+import matplotlib.dates as mdates
+
+try:
+    from statsmodels.stats.multitest import multipletests
+except ImportError:
+    print("statsmodels package not found. Attempting to install...")
+    import subprocess
+    import sys
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "statsmodels"]
+    )
+    # This part of the code should go first since importing parallelized_runs already requires the signet package
+    from statsmodels.stats.multitest import multipletests
 
 ## Clustering packages etc
 try:
@@ -29,7 +46,7 @@ try:
     from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
     from econml.dml import LinearDML, SparseLinearDML
 except ImportError:
-    print("econml package not found. Attempting to install from GitHub...")
+    print("econml package not found. Attempting to install...")
     import subprocess
     import sys
     subprocess.check_call(
@@ -40,13 +57,7 @@ except ImportError:
     from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
     from econml.dml import LinearDML, SparseLinearDML
 
-import scipy.stats as st
-from scipy.stats import norm
-import matplotlib.pyplot as plt
-from matplotlib.dates import DateFormatter
-import matplotlib.dates as mdates
-
-from parallelized_runs import calculate_pnl
+# from parallelized_runs import calculate_pnl
 
 # Helper function to make lagged copies of a DataFrame
 def make_lags(df, p):
