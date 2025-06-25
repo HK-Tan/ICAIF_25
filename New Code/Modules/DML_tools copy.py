@@ -11,17 +11,12 @@ try:
     from signet.cluster import Cluster
 except ImportError:
     print("Signet package not found. Attempting to install from GitHub...")
-    try:
-        import subprocess
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"]
-        )
-        # This part of the code should go first since importing parallelized_runs already requires the signet package
-        from signet.cluster import Cluster
-        print("Signet package installed successfully.")
-    except Exception as e:
-        print(f"Error installing Signet package: {e}")
-        print("Please install it manually: pip install git+https://github.com/alan-turing-institute/SigNet.git")
+    import subprocess
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"]
+    )
+    # This part of the code should go first since importing parallelized_runs already requires the signet package
+    from signet.cluster import Cluster
 
 ## EconML packages
 import scipy.stats as st
@@ -84,8 +79,7 @@ def calculate_weighted_cluster_portfolio_returns(
     sigma_for_gaussian_weights: float
 ) -> pd.DataFrame:
     """
-    Calculates weighted returns for asset clusters based on correlation,
-    clustering, and Gaussian distance from centroids.
+    Calculates weighted returns for asset clusters using a streamlined, vectorized approach.
 
     NOTE: This version has no error handling and assumes perfect input data.
 
@@ -99,71 +93,55 @@ def calculate_weighted_cluster_portfolio_returns(
     Returns:
         pd.DataFrame: DataFrame containing the weighted returns for each cluster.
     """
+    # --- 1. Calculate Correlation Matrix (More Efficiently) ---
+    # Pearson correlation is invariant to scaling, so StandardScaler is redundant.
+    correlation_matrix_df = asset_returns_lookback_df.corr(method='pearson').fillna(0)
 
-    # --- 1. Calculate Correlation Matrix ---
-    scaler = StandardScaler()
-    normalized_data = scaler.fit_transform(asset_returns_lookback_df)
-    normalized_df = pd.DataFrame(
-        normalized_data,
-        index=asset_returns_lookback_df.index,
-        columns=asset_returns_lookback_df.columns
-    )
-    correlation_matrix_df = normalized_df.corr(method='pearson').fillna(0)
-
-    # --- 2. Apply Clustering Algorithm ---
-    def _get_signet_data(corr_df: pd.DataFrame):
-        # Using .apply/.map is a more modern approach than the deprecated .applymap
-        pos_corr = corr_df.apply(lambda s: s.map(lambda x: x if x >= 0 else 0))
-        neg_corr = corr_df.apply(lambda s: s.map(lambda x: abs(x) if x < 0 else 0))
-        return (sparse.csc_matrix(pos_corr.values), sparse.csc_matrix(neg_corr.values))
+    # --- 2. Apply Clustering Algorithm (with Vectorized SIGNET Prep) ---
+    # Vectorize the creation of positive and negative correlation matrices.
+    pos_corr = np.maximum(correlation_matrix_df.values, 0)
+    neg_corr = np.maximum(-correlation_matrix_df.values, 0)
+    signet_data = (sparse.csc_matrix(pos_corr), sparse.csc_matrix(neg_corr))
 
     num_assets = correlation_matrix_df.shape[0]
     effective_n_clusters = min(n_clusters_to_form, num_assets)
 
-    signet_data = _get_signet_data(correlation_matrix_df)
+    # Assuming 'Cluster' is an external class with a 'SPONGE_sym' method
     cluster_obj = Cluster(signet_data)
     labels = cluster_obj.SPONGE_sym(effective_n_clusters)
+    asset_names = asset_returns_lookback_df.columns
 
-    # --- 3. Define Clusters and Centroids ---
-    asset_names = list(correlation_matrix_df.columns)
-    labeled_assets = pd.DataFrame({'ClusterLabel': labels}, index=asset_names)
+    # --- 3. Calculate Centroids, Weights, and Returns (Vectorized) ---
 
-    unique_labels = np.unique(labels)
-    cluster_definitions = {}
-    for label_val in unique_labels:
-        cluster_name = f'Cluster_{label_val + 1}'
-        tickers_in_cluster = list(labeled_assets[labeled_assets['ClusterLabel'] == label_val].index)
-        centroid_ts = asset_returns_lookback_df[tickers_in_cluster].mean(axis=1)
-        cluster_definitions[cluster_name] = {
-            'tickers': tickers_in_cluster,
-            'centroid_ts': centroid_ts
-        }
+    # Calculate all cluster centroids at once using groupby
+    # T -> Transpose so assets are rows for easy grouping
+    centroids_df = asset_returns_lookback_df.T.groupby(labels).mean().T
 
-    # --- 4. Calculate Weighted Cluster Returns ---
-    cluster_returns_dict = {}
-    for cluster_name, info in cluster_definitions.items():
-        tickers_in_cluster = info['tickers']
-        centroid_ts_for_dist_calc = info['centroid_ts']
+    # Create a DataFrame aligned with original returns, where each column is the
+    # appropriate centroid for that asset. This prepares for vectorized subtraction.
+    aligned_centroids_df = centroids_df.iloc[:, labels]
+    aligned_centroids_df.columns = asset_names
 
-        asset_gaussian_weights = {}
-        total_gaussian_weight_sum = 0.0
+    # Calculate squared Euclidean distance between each asset and its centroid (all at once)
+    squared_distances = ((asset_returns_lookback_df - aligned_centroids_df)**2).sum(axis=0)
 
-        for ticker in tickers_in_cluster:
-            asset_returns_for_dist_calc = asset_returns_lookback_df[ticker]
-            squared_distance = np.sum((centroid_ts_for_dist_calc.values - asset_returns_for_dist_calc.values)**2)
-            weight = np.exp(-squared_distance / (2 * (sigma_for_gaussian_weights**2)))
-            asset_gaussian_weights[ticker] = weight
-            total_gaussian_weight_sum += weight
+    # Calculate unnormalized Gaussian weights from distances (all at once)
+    unnormalized_weights = np.exp(-squared_distances / (2 * sigma_for_gaussian_weights**2))
 
-        current_cluster_period_returns = pd.Series(0.0, index=asset_returns_lookback_df.index)
-        for ticker, unnormalized_weight in asset_gaussian_weights.items():
-            normalized_weight = unnormalized_weight / total_gaussian_weight_sum
-            current_cluster_period_returns += asset_returns_lookback_df[ticker] * normalized_weight
+    # Normalize weights within each cluster using groupby and transform
+    # This ensures weights for assets in the same cluster sum to 1.
+    normalized_weights = unnormalized_weights.groupby(labels).transform(lambda x: x / x.sum())
 
-        cluster_returns_dict[cluster_name] = current_cluster_period_returns
+    # Apply normalized weights to asset returns via broadcasting
+    weighted_asset_returns = asset_returns_lookback_df * normalized_weights
 
-    return pd.DataFrame(cluster_returns_dict, index=asset_returns_lookback_df.index)
+    # Sum the weighted returns for each cluster using groupby
+    cluster_returns_df = weighted_asset_returns.T.groupby(labels).sum().T
 
+    # Rename columns for clarity, matching the original function's output format
+    cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
+
+    return cluster_returns_df
 #### A library of regressors that can be used with DML
 """
 Here, we make use of regressors that automatically processes multiple outputs as running it
