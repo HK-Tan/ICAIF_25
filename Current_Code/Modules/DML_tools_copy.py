@@ -2,9 +2,13 @@ import warnings
 warnings.filterwarnings("ignore")
 import pandas as pd
 import numpy as np
-warnings.filterwarnings("ignore", category=UserWarning, module='statsmodels')
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor
+from sklearn.model_selection import TimeSeriesSplit, train_test_split
+from sklearn.metrics import root_mean_squared_error
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.base import clone
+from sklearn.linear_model import Lasso
+from statsmodels.stats.multitest import multipletests
 
 ## Clustering packages etc
 try:
@@ -12,6 +16,7 @@ try:
 except ImportError:
     print("Signet package not found. Attempting to install from GitHub...")
     import subprocess
+    import sys
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"]
     )
@@ -19,18 +24,24 @@ except ImportError:
     from signet.cluster import Cluster
 
 ## EconML packages
+try:
+    from econml.inference import StatsModelsInference
+    from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
+    from econml.dml import LinearDML, SparseLinearDML
+except ImportError:
+    print("econml package not found. Attempting to install from GitHub...")
+    import subprocess
+    import sys
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "econml"]
+    )
+    # This part of the code should go first since importing parallelized_runs already requires the signet package
+    from econml.inference import StatsModelsInference
+    from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
+    from econml.dml import LinearDML, SparseLinearDML
+
 import scipy.stats as st
 from scipy.stats import norm
-from econml.inference import StatsModelsInference
-from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
-from statsmodels.stats.multitest import multipletests
-from econml.dml import LinearDML, SparseLinearDML
-from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor
-from sklearn.model_selection import TimeSeriesSplit, train_test_split
-from sklearn.metrics import root_mean_squared_error
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.base import clone
-from sklearn.linear_model import Lasso
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
@@ -142,6 +153,7 @@ def calculate_weighted_cluster_portfolio_returns(
     cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
 
     return cluster_returns_df
+
 #### A library of regressors that can be used with DML
 """
 Here, we make use of regressors that automatically processes multiple outputs as running it
@@ -182,8 +194,9 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
 To-do: Push the starting days, check if the indices make sense
 """
 
-def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
+def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
                                         p_max=5,  # maximum number of lags
+                                        k = 20, # number of clusters
                                         model_y_name='extra_trees',
                                         model_t_name='extra_trees',
                                         model_y_params=None,
@@ -250,14 +263,11 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
 
     test_start = lookback_days  # Start of the test set after training and validation
-    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
+    num_days = lookback_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
     p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
-    Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
+    Y_hat_next_store = np.zeros((num_days - test_start, k))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
-
-    if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
-        raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
 
     for day_idx in range(test_start, num_days):
         # The ccomments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
@@ -269,6 +279,9 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         valid_end = valid_start + days_valid - 1        # e.g. 988 + 20 - 1 = 1007; total length = 20
 
         valid_errors = []
+
+        asset_df = calculate_weighted_cluster_portfolio_returns(lookback_df, k, .01)
+
         for p in range(1, p_max + 1):
             current_error = 0
             for valid_shift in range(days_valid):
