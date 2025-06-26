@@ -197,7 +197,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
 
     for day_idx in range(test_start, num_days):
-        # The ccomments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
+        # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
         print("It is day", day_idx, "out of", num_days, "days in the dataset.")
         # First, we perform a parameter search for the optimal p.
         train_start = max(0, day_idx - lookback_days)   # e.g. 0
@@ -211,7 +211,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
             for valid_shift in range(days_valid):
                 # e.g. valid_shift = 0, 19
                 start_idx = train_start + valid_shift    # e.g. 0 + 0, 0 + 19 = 19
-                end_idx = train_end + valid_shift + 2    # e.g. 987 + 0 + 2, 987 + 19 + 2 = 1008
+                end_idx = train_end + valid_shift + 2    # e.g. 987 + 0 + 2, 987 + 19 + 2 = 1008 (usually excluded)
                 # + 2 is to account for the fact that python slicing excludes the last element, and
                 # we need to set aside the element at the last index of the train set for validation.
 
@@ -259,10 +259,12 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         p_optimal[day_idx - test_start] = p_opt  # Store the optimal p for this day
 
         # Once we have determined the optimal p value, we now fit with "today's" data set
-        # Terminal start_idx = 19
-        # Terminal end_idx = 1008 (from results of previous loop at the end of the loop for valid)
-        Y_df_lagged = asset_df.iloc[start_idx:end_idx+1,:].copy()  # 19:1009, but 1009 is excluded, so 1008 is the "test" element
-        W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx+1,:], p_opt)
+        # Recalculate indices for the full lookback window
+        final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
+        final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
+        
+        Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
+        W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
         T_df_lagged = make_lags(Y_df_lagged, p_opt)
         Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
         Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
@@ -320,11 +322,11 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=Fa
     """
 
     # Convert log returns to simple returns for a "factor"
-    simple_returns = np.exp(actual_df)
+    # Percentage change is given by exp(log_return) - 1
+    simple_returns = np.exp(actual_df) - 1
 
     # Set trading direction: -1 for contrarian, 1 for normal
     direction = -1 if contrarian else 1
-
     if pnl_strategy == "naive":
         raw_positions = direction * np.sign(forecast_df)
         # Normalize so absolute positions sum to 1 each day
@@ -347,11 +349,12 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=Fa
         positions = positions.div(row_sums, axis=0)
 
     # Calculate daily portfolio returns
+    #print(positions)
     daily_pnl = positions * simple_returns
-    daily_portfolio_returns = daily_pnl.sum(axis=1)
+    daily_portfolio_returns_per = daily_pnl.sum(axis=1)
+    print("Daily portfolio returns (percentage change):", daily_portfolio_returns_per)
+    daily_portfolio_returns = daily_portfolio_returns_per + 1
 
-    # CORRECT: Compound the returns
-    #cumulative_returns = daily_portfolio_returns.cumprod() - 1
-    cumulative_returns = (daily_portfolio_returns.cumsum())/ len(daily_portfolio_returns)
+    cumulative_returns = daily_portfolio_returns.cumprod() - 1
 
-    return cumulative_returns
+    return cumulative_returns, daily_portfolio_returns_per
