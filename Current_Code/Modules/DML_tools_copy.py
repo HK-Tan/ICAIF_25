@@ -97,7 +97,8 @@ def realign(Y,T,W):
     return full[Y_cols], full[T_cols], full[W_cols]
 
 def calculate_weighted_cluster_portfolio_returns(
-    asset_returns_lookback_df: pd.DataFrame,
+    asset_returns_df: pd.DataFrame,
+    lookback_period: int,
     n_clusters_to_form: int,
     sigma_for_gaussian_weights: float
 ) -> pd.DataFrame:
@@ -107,7 +108,7 @@ def calculate_weighted_cluster_portfolio_returns(
     NOTE: This version has no error handling and assumes perfect input data.
 
     Args:
-        asset_returns_lookback_df (pd.DataFrame): DataFrame of asset returns.
+        asset_returns_df (pd.DataFrame): DataFrame of asset returns.
             Rows are timestamps, columns are asset tickers.
         n_clusters_to_form (int): The desired number of clusters to form.
         sigma_for_gaussian_weights (float): Sigma value used in the Gaussian
@@ -118,7 +119,7 @@ def calculate_weighted_cluster_portfolio_returns(
     """
     # --- 1. Calculate Correlation Matrix (More Efficiently) ---
     # Pearson correlation is invariant to scaling, so StandardScaler is redundant.
-    correlation_matrix_df = asset_returns_lookback_df.corr(method='pearson').fillna(0)
+    correlation_matrix_df = asset_returns_df[:lookback_period].corr(method='pearson').fillna(0)
 
     # --- 2. Apply Clustering Algorithm (with Vectorized SIGNET Prep) ---
     # Vectorize the creation of positive and negative correlation matrices.
@@ -137,15 +138,15 @@ def calculate_weighted_cluster_portfolio_returns(
 
     # Calculate all cluster centroids at once using groupby
     # T -> Transpose so assets are rows for easy grouping
-    centroids_df = asset_returns_lookback_df.T.groupby(labels).mean().T
+    centroids_df = asset_returns_df.T.groupby(labels).mean().T
 
     # Create a DataFrame aligned with original returns, where each column is the
     # appropriate centroid for that asset. This prepares for vectorized subtraction.
     aligned_centroids_df = centroids_df.iloc[:, labels]
-    aligned_centroids_df.columns = asset_returns_lookback_df.columns
+    aligned_centroids_df.columns = asset_returns_df.columns
 
     # Calculate squared Euclidean distance between each asset and its centroid (all at once)
-    squared_distances = ((asset_returns_lookback_df - aligned_centroids_df)**2).sum(axis=0)
+    squared_distances = ((asset_returns_df - aligned_centroids_df)**2).sum(axis=0)
 
     # Calculate unnormalized Gaussian weights from distances (all at once)
     unnormalized_weights = np.exp(-squared_distances / (2 * sigma_for_gaussian_weights**2))
@@ -155,10 +156,10 @@ def calculate_weighted_cluster_portfolio_returns(
     normalized_weights = unnormalized_weights.groupby(labels).transform(lambda x: x / x.sum())
 
     # Apply normalized weights to asset returns via broadcasting
-    weighted_asset_returns = asset_returns_lookback_df * normalized_weights
+    weighted_asset_returns = (np.exp(asset_returns_df) - 1) * normalized_weights
 
     # Sum the weighted returns for each cluster using groupby
-    cluster_returns_df = weighted_asset_returns.T.groupby(labels).sum().T
+    cluster_returns_df = np.log(1 + weighted_asset_returns.T.groupby(labels).sum().T)
 
     # Rename columns for clarity, matching the original function's output format
     # cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
@@ -205,6 +206,7 @@ def fit_and_predict(Y_df_lagged, W_df_lagged, p, model_y_name, model_y_params, m
     T_df_lagged = make_lags(Y_df_lagged, p)
     Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
     Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
+    W_df_test, T_df_test = W_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:]
     est = LinearDML(
         model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
         model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
@@ -230,7 +232,7 @@ def fit_and_predict(Y_df_lagged, W_df_lagged, p, model_y_name, model_y_params, m
 To-do: Push the starting days, check if the indices make sense
 """
 
-def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
+def rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
                                         p_max=5,  # maximum number of lags
                                         k = 20, # number of clusters
                                         model_y_name='extra_trees',
@@ -299,15 +301,15 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
 
 
     test_start = lookback_days  # Start of the test set after training and validation
-    num_days = lookback_df.shape[0] - 1  # Total number of days in the dataset,
+    num_days = whole_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
     p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
     Y_hat_next_store = np.zeros((num_days - test_start, k))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
-    asset_df = calculate_weighted_cluster_portfolio_returns(lookback_df, k, .01)
+    asset_df = calculate_weighted_cluster_portfolio_returns(whole_df, lookback_days, k, 1)
 
-    for day_idx in tqdm(range(test_start, num_days)):
+    for day_idx in range(test_start, num_days):
         # The ccomments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
         print("It is day", day_idx, "out of", num_days, "days in the dataset.")
         # First, we perform a parameter search for the optimal p.
@@ -331,6 +333,7 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
                 # Recall that columns are days, and rows are tickers
                 Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
                 W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
+                Y_df_test = Y_df_lagged.iloc[-1:,:]
                 Y_hat_next = fit_and_predict(
                     Y_df_lagged,
                     W_df_lagged,
@@ -341,7 +344,6 @@ def rolling_window_OR_VAR_w_para_search(lookback_df, confound_df,
                     model_t_params,
                     cv_folds
                 )
-                Y_df_test = Y_df_lagged.iloc[-1:,:]
 
                 # Obtain error in the desired metric and accumulate it over the validation window
                 if error_metric == 'rmse':
