@@ -239,40 +239,64 @@ class ClusterVARForecaster(NaiveVARForecaster):
     def _calculate_weighted_cluster_returns(self, asset_returns_df_slice, period_indices_on_slice):
         """
         Calculates the weighted returns for each cluster based on the Gaussian distance from the centroid.
+
+        This version is refactored for numerical stability and efficiency, ensuring that weights
+        can be calculated even for very small sigma values without underflowing to zero.
+
         Args:
             asset_returns_df_slice (pd.DataFrame): DataFrame slice of asset returns for the current period.
             period_indices_on_slice (tuple): Tuple containing start and end indices for the current period slice.
+
         Returns:
             pd.DataFrame: DataFrame containing the weighted returns for each cluster.
         """
         start_idx_slice, end_idx_slice = period_indices_on_slice
-        lookback_data_for_dist_calc = self.current_lookback_data_for_weights_#.iloc[self.lookback_start_idx_:self.lookback_end_idx_]
+        # Data for calculating distances (from the lookback period)
+        lookback_data_for_dist_calc = self.current_lookback_data_for_weights_
+        # Data for applying weights (from the current forward period)
         data_slice_current_period = asset_returns_df_slice.iloc[start_idx_slice:end_idx_slice]
 
         cluster_returns_dict = {}
         for cluster_name, info in self.cluster_definitions_.items():
-            # Info contains 'tickers' and 'centroid_ts'
             tickers_in_cluster = info['tickers']
+
+            # Skip if cluster is empty or tickers are not in the data
+            if not tickers_in_cluster or not all(t in lookback_data_for_dist_calc.columns for t in tickers_in_cluster):
+                continue
+
+            # --- Vectorized and Stabilized Weight Calculation ---
+
+            # 1. Select the relevant data for this cluster
             centroid_ts_for_dist_calc = info['centroid_ts'].iloc[self.lookback_start_idx_:self.lookback_end_idx_]
+            asset_returns_for_dist_calc = lookback_data_for_dist_calc[tickers_in_cluster]
 
-            asset_gaussian_weights = {}
-            total_gaussian_weight_sum = 0.0
-            for ticker in tickers_in_cluster:
-                # Assumes ticker is in lookback_data_for_dist_calc.columns
-                asset_returns_for_dist_calc = lookback_data_for_dist_calc[ticker]
-                # Assumes lengths match and not empty
-                squared_distance = np.sum((centroid_ts_for_dist_calc.values - asset_returns_for_dist_calc.values)**2)
-                weight = np.exp(-squared_distance / (2 * (self.sigma_for_weights**2)))
-                asset_gaussian_weights[ticker] = weight
-                total_gaussian_weight_sum += weight
+            # 2. Calculate squared distances for all assets in the cluster at once
+            # The result is a pd.Series indexed by ticker
+            squared_distances = (asset_returns_for_dist_calc.subtract(centroid_ts_for_dist_calc, axis=0)**2).sum(axis=0)
 
-            current_cluster_period_returns = pd.Series(0.0, index=data_slice_current_period.index)
-            # Assumes total_gaussian_weight_sum > 0
-            for ticker, unnormalized_weight in asset_gaussian_weights.items():
-                 # Assumes ticker is in data_slice_current_period.columns
-                normalized_weight = unnormalized_weight / total_gaussian_weight_sum
-                current_cluster_period_returns += data_slice_current_period[ticker] * normalized_weight
-            cluster_returns_dict[cluster_name] = current_cluster_period_returns.values
+            # 3. Stabilize the exponent to prevent numerical underflow (THE FIX)
+            epsilon = 1e-12
+            exponent_vals = -squared_distances / (2 * (self.sigma_for_weights**2 + epsilon))
+
+            # Subtract the max exponent. After this, the largest stable exponent is 0.
+            stable_exponent_vals = exponent_vals - exponent_vals.max()
+
+            # 4. Calculate weights. The largest weight will now be exp(0) = 1.
+            # The sum is guaranteed to be >= 1, preventing division by zero.
+            unnormalized_weights = np.exp(stable_exponent_vals)
+
+            # 5. Normalize the weights
+            total_weight_sum = unnormalized_weights.sum()
+            normalized_weights = unnormalized_weights / total_weight_sum # This is now safe
+
+            # --- Calculate Weighted Portfolio Returns ---
+            # Apply the normalized weights to the current period's returns
+            returns_to_weight = data_slice_current_period[tickers_in_cluster]
+
+            # The result is a pd.Series representing the daily returns for this cluster portfolio
+            current_cluster_period_returns = np.log(1+((np.exp(returns_to_weight)-1) * normalized_weights).sum(axis=1))
+
+            cluster_returns_dict[cluster_name] = current_cluster_period_returns
 
         return pd.DataFrame(cluster_returns_dict, index=data_slice_current_period.index)
 

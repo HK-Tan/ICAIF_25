@@ -148,8 +148,23 @@ def calculate_weighted_cluster_portfolio_returns(
     # Calculate squared Euclidean distance between each asset and its centroid (all at once)
     squared_distances = ((asset_returns_df - aligned_centroids_df)**2).sum(axis=0)
 
-    # Calculate unnormalized Gaussian weights from distances (all at once)
-    unnormalized_weights = np.exp(-squared_distances / (2 * sigma_for_gaussian_weights**2))
+    # To prevent numerical underflow when sigma is very small, we stabilize the
+    # exponent calculation. This is a standard trick (similar to the log-sum-exp trick).
+
+    # 1. Calculate the raw exponent values. Add a small epsilon to sigma to avoid division by zero if sigma is exactly 0.
+    epsilon = 1e-12
+    exponent_vals = -squared_distances / (2 * (sigma_for_gaussian_weights**2 + epsilon))
+
+    # 2. Subtract the maximum exponent *within each cluster*.
+    # This shifts the exponent range for each cluster so that the max value is 0.
+    # The `transform` function broadcasts the result back to the original shape.
+    max_exponent_per_cluster = exponent_vals.groupby(labels).transform('max')
+    stable_exponent_vals = exponent_vals - max_exponent_per_cluster
+
+    # 3. Calculate unnormalized weights using the stabilized exponents.
+    # Now, the largest weight in each cluster will be exp(0) = 1.
+    # This guarantees the sum of weights per cluster is always >= 1, preventing division by zero.
+    unnormalized_weights = np.exp(stable_exponent_vals)
 
     # Normalize weights within each cluster using groupby and transform
     # This ensures weights for assets in the same cluster sum to 1.
@@ -160,9 +175,6 @@ def calculate_weighted_cluster_portfolio_returns(
 
     # Sum the weighted returns for each cluster using groupby
     cluster_returns_df = np.log(1 + weighted_asset_returns.T.groupby(labels).sum().T)
-
-    # Rename columns for clarity, matching the original function's output format
-    # cluster_returns_df.columns = [f"Cluster_{i + 1}" for i in sorted(np.unique(labels))]
 
     return cluster_returns_df
 
@@ -307,7 +319,7 @@ def rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
     Y_hat_next_store = np.zeros((num_days - test_start, k))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
-    asset_df = calculate_weighted_cluster_portfolio_returns(whole_df, lookback_days, k, .01)
+    asset_df = calculate_weighted_cluster_portfolio_returns(whole_df, lookback_days, k, .05)
 
     if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
         raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
