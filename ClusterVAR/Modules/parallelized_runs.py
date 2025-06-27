@@ -4,45 +4,43 @@ import multiprocessing
 from ClusterVARForecast import ClusterVARForecaster, NaiveVARForecaster
 
 
-
-
 def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=False):
 
     # Convert log returns to simple returns
     simple_returns = np.exp(actual_df)
-    
+
     # Set trading direction: -1 for contrarian, 1 for normal
     direction = -1 if contrarian else 1
-    
+
     if pnl_strategy == "naive":
         raw_positions = direction * np.sign(forecast_df)
         # Normalize so absolute positions sum to 1 each day
         row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
         positions = raw_positions.div(row_abs_sum, axis=0)
-    
+
     elif pnl_strategy == "weighted":
         row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
         positions = direction * forecast_df.div(row_abs_sum, axis=0)
-    
+
     elif pnl_strategy == "top":
         positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
-        
+
         for col in forecast_df.columns:
             threshold = forecast_df[col].abs().mean()
             positions.loc[forecast_df[col] > threshold, col] = direction
             positions.loc[forecast_df[col] < -threshold, col] = -direction
-        
+
         row_sums = positions.abs().sum(axis=1).replace(0, 1)
         positions = positions.div(row_sums, axis=0)
-    
+
     # Calculate daily PnL using simple returns
     daily_pnl = positions * simple_returns
-    
+
     # Return cumulative PnL over time (tracking accumulation each day)
     # return np.array([2,2])
     return daily_pnl.sum(axis=1)
-    
-    
+
+
 
 
 def _process_single_hyper_eval_task(args_bundle):
@@ -127,7 +125,7 @@ def _perform_final_evaluation_for_window_task(args_bundle):
     avg_pnl_cluster = pnl_series_cluster.prod(axis=0)
 
     forecast_data_cluster_sample, actual_data_cluster_sample = None, None
-    
+
     # if store_sample_forecasts_flag_for_this_window:
     forecast_data_cluster_sample = forecasted_returns_cluster
     actual_data_cluster_sample = true_eval_returns_cluster
@@ -195,19 +193,19 @@ def run_sliding_window_var_evaluation_vectorized(
                 for p_idx, p_val in enumerate(var_order_config):
                     # Assumes hyper_train_len > p_val
                     all_hyper_eval_tasks.append((
-                        i, 
-                        hyper_train_df_tuple, 
+                        i,
+                        hyper_train_df_tuple,
                         hyper_eval_df_tuple,
-                        hyper_train_len, 
-                        hyper_eval_len, 
+                        hyper_train_len,
+                        hyper_eval_len,
                         asset_columns_list,
-                        k_val, 
-                        cluster_method, 
-                        p_val, 
+                        k_val,
+                        cluster_method,
+                        p_val,
                         sigma_intra_cluster,
-                        rep_idx, 
-                        k_idx, 
-                        p_idx, 
+                        rep_idx,
+                        k_idx,
+                        p_idx,
                         pnl_method
                     ))
 
@@ -242,18 +240,18 @@ def run_sliding_window_var_evaluation_vectorized(
         store_sample_flag = store_sample_forecasts and (i == num_actual_windows - 1)
 
         all_final_eval_tasks.append((
-            i, 
-            lookback_tuple, 
+            i,
+            lookback_tuple,
             eval_tuple,
-            initial_lookback_len, 
-            eval_len, 
+            initial_lookback_len,
+            eval_len,
             asset_columns_list,
-            best_n_clusters, 
-            best_var_order, 
-            cluster_method, 
+            best_n_clusters,
+            best_var_order,
+            cluster_method,
             sigma_intra_cluster,
-            run_naive_var_comparison, 
-            store_sample_flag, 
+            run_naive_var_comparison,
+            store_sample_flag,
             pnl_method
         ))
 
@@ -270,7 +268,7 @@ def run_sliding_window_var_evaluation_vectorized(
 
     # cluster_return_forecasts_list = []
     # cluster_return_actual_list = []
-    
+
     pnls = []
 
     for i, result_tuple in enumerate(final_results_list):
