@@ -40,6 +40,7 @@ from sklearn.linear_model import Lasso
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
+from multiprocessing import Pool
 
 # from parallelized_runs import calculate_pnl
 
@@ -299,7 +300,6 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     return result
 
-
 def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                                  p_max=5,  # maximum number of lags
                                                  model_y_name='extra_trees',
@@ -309,7 +309,8 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                                  cv_folds=5,
                                                  lookback_days=252*4,  # 4 years of daily data
                                                  days_valid=20,  # 1 month validation set
-                                                 error_metric='rmse'):
+                                                 error_metric='rmse',
+                                                 max_threads=12):
 
     if model_y_params is None:
         model_y_params = {}
@@ -321,8 +322,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
 
-    # Change p_optimal to np.ones to give a reasonable default in case a real p_opt is not found for some reason
-    p_optimal = np.ones(num_days - test_start)  # Store optimal p for each day in the test set
+    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
     Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
@@ -337,8 +337,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
             for valid_shift in range(days_valid):
                 runs_configs_list.append((day_idx, p, valid_shift))
 
-
-    # This main loop can be parallelized across the list of run configurations, i.e. (day, p, shift) tuples
+    # IZ: This main loop can be parallelized across the list of run configurations, i.e. (day, p, shift) tuples
     # It should return a list of results of the error metric for each of those
     # TODO: Parallelize this
     error_metric_results = []
@@ -346,7 +345,9 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         (day_idx, p, valid_shift) = curr_cfg
         
         # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
-        print("It is day", day_idx, "out of", num_days, "days in the dataset.")
+        # Only print the status once per day combination
+        if (p==1 and valid_shift==0 and day_idx%10==0):
+            print("Performing parameter search for day", day_idx, "out of", num_days, "days in the dataset.")
         # First, we perform a parameter search for the optimal p.
         train_start = max(0, day_idx - lookback_days)   # e.g. 0
         train_end = day_idx - days_valid - 1            # e.g. 1008 - 20 - 1 = 987
@@ -393,28 +394,39 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         Y_hat_next = Y_base + T_df_test @ theta.T
 
         if error_metric == 'rmse':
-            # This should be a returned value in the function - will get automatically pushed to a results list by Pool
+            # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
             error_metric_results.append(root_mean_squared_error(Y_df_test, Y_hat_next))
 
 
-    # Load the run configurations and error metric results into a dataframe for aggregation
-    runs_df = pd.DataFrame(zip(*runs_configs_list,error_metric_results), columns=["day_idx", "p", "valid_shift", "error_metric"])
+    # IZ: Load the run configurations and error metric results into a dataframe for aggregation
+    runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)], 
+                           columns=["day_idx", "p", "valid_shift", "error_metric"])
     # Group by day_index and p to get the cumulative errors per day/p combination over the validation set
     runs_df_sum_error = runs_df.groupby(['day_idx', 'p']).sum()
     # Now group by the day index again to find the p value that gives minimum train error
-    runs_df_p_opt = runs_df_sum_error.loc[runs_df_sum_error.groupby(level="day_idx").idxmin()]
-    day_p_opt_tuples = runs_df_p_opt.index().tolist()
+    # First find the indices corresponding to the minimum error rows per day_idx
+    p_opt_indices = runs_df_sum_error.groupby('day_idx')['error_metric'].idxmin()
+    # Take those indices from the original dataframe, and convert to a list of tuples of (day_idx, p_opt)
+    runs_df_p_opt = runs_df_sum_error.loc[p_opt_indices]
+    day_p_opt_tuples = runs_df_p_opt.index.tolist()
+
+    print("Per-day optimal VAR order (p) and corresponding validation error:")
+    print(runs_df_p_opt.reset_index().values.tolist())
 
     for (day_idx, p_opt) in day_p_opt_tuples:
-        p_optimal[day_idx] = p_opt
+        # print((day_idx, p_opt))
+        p_optimal[day_idx-test_start] = p_opt
 
 
     
-    # Now we test the optimal found p's on the validation sets, this can be parallelized over the day indices as well
+    # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
     # TODO: Parallelize this
     for day_idx in range(test_start, num_days):
-        # Once we have determined the optimal p value, we now fit with "today's" data set
-        # Recalculate indices for the full lookback window
+        if day_idx%10==0:
+            print("Performing prediction for day", day_idx, "out of", num_days, "days in the dataset.")
+
+        # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
+        # IZ: Recalculate indices for the full lookback window
         final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
         final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
         
@@ -443,8 +455,8 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
             Y_base_folds.append(pred)
         Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
         theta = est.const_marginal_ate()
-        
-        # This should be a returned value in the function - will get automatically pushed to a results list by Pool
+
+        # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
         Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
 
 
