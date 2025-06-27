@@ -1,7 +1,0 @@
-setup.py
-./bindings.cpp
-cpp_rls_filter.egg-info/PKG-INFO
-cpp_rls_filter.egg-info/SOURCES.txt
-cpp_rls_filter.egg-info/dependency_links.txt
-cpp_rls_filter.egg-info/not-zip-safe
-cpp_rls_filter.egg-info/top_level.txt
