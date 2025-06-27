@@ -454,10 +454,10 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     # IZ: Load the run configurations and error metric results into a dataframe for aggregation
     runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)], 
                            columns=["day_idx", "p", "valid_shift", "error_metric"])
-    # Group by day_index and p to get the cumulative errors per day/p combination over the validation set
+    # Group by day_index and p to get the cumulative errors per day/p combination over the training set
     runs_df_sum_error = runs_df.groupby(['day_idx', 'p']).sum()
     # Now group by the day index again to find the p value that gives minimum train error
-    # First find the indices corresponding to the minimum error rows per day_idx
+    # First find the df indices corresponding to the minimum error rows per day_idx
     p_opt_indices = runs_df_sum_error.groupby('day_idx')['error_metric'].idxmin()
     # Take those indices from the original dataframe, and convert to a list of tuples of (day_idx, p_opt)
     runs_df_p_opt = runs_df_sum_error.loc[p_opt_indices]
@@ -471,7 +471,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         p_optimal[day_idx-test_start] = p_opt
     
     print("Completed VAR order search")
-    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
+    print(f"Total elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
     
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
