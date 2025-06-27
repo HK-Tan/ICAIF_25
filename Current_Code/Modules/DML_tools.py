@@ -41,8 +41,6 @@ import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
 from multiprocessing import Pool
-import time
-from datetime import datetime
 
 # from parallelized_runs import calculate_pnl
 
@@ -302,104 +300,6 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     return result
 
-# IZ: Function definition for a single training error evaluation, used for parallelization
-def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_valid, 
-                    model_y_name, model_y_params, model_t_name, model_t_params, 
-                    cv_folds, error_metric):
-    (day_idx, p, valid_shift) = curr_cfg
-
-    # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
-    train_start = max(0, day_idx - lookback_days)   # e.g. 0
-    train_end = day_idx - days_valid - 1            # e.g. 1008 - 20 - 1 = 987
-    valid_start = train_end + 1                     # e.g. 988
-    valid_end = valid_start + days_valid - 1        # e.g. 988 + 20 - 1 = 1007; total length = 20
-
-    # e.g. valid_shift = 0, 19
-    start_idx = train_start + valid_shift    # e.g. 0 + 0, 0 + 19 = 19
-    end_idx = train_end + valid_shift + 2    # e.g. 987 + 0 + 2, 987 + 19 + 2 = 1008 (usually excluded)
-    # + 2 is to account for the fact that python slicing excludes the last element, and
-    # we need to set aside the element at the last index of the train set for validation.
-
-    # Create lagged treatment variables
-    # Recall that columns are days, and rows are tickers
-    Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
-    W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
-    T_df_lagged = make_lags(Y_df_lagged, p)
-    Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-    Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-    Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-    # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for
-    #  validation, so we have 19:1006 (1006 included) for training and 1007 for "internal validation".
-
-    est = LinearDML(
-        model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-        model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-        cv=TimeSeriesSplit(n_splits=cv_folds),
-        discrete_treatment=False,
-        random_state=0
-    )
-    est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-    # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-    # The structure is: est.models_y[0] contains the 5 CV fold models
-    Y_base_folds = []
-    for model in est.models_y[0]:
-        # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-        pred = model.predict(W_df_test)
-        Y_base_folds.append(pred)
-
-    Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-    theta = est.const_marginal_ate()
-    Y_hat_next = Y_base + T_df_test @ theta.T
-
-    if error_metric == 'rmse':
-        # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
-        return root_mean_squared_error(Y_df_test, Y_hat_next)
-    else:
-        raise ValueError("Unsupported error metric.")
-    
-
-# IZ: Function definition for a single future prediction (using found optimal p), used for parallelization
-def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt, 
-                    model_y_name, model_y_params, model_t_name, model_t_params, cv_folds):
-
-    # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
-    # IZ: Recalculate indices for the full lookback window
-    final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
-    final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
-
-    Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
-    W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
-    T_df_lagged = make_lags(Y_df_lagged, p_opt)
-    Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-    Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-    Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-
-    est = LinearDML(
-        model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-        model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-        cv=TimeSeriesSplit(n_splits=cv_folds),
-        discrete_treatment=False,
-        random_state=0
-    )
-    est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-    # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-    # The structure is: est.models_y[0] contains the 5 CV fold models
-    Y_base_folds = []
-    for model in est.models_y[0]:
-        # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-        pred = model.predict(W_df_test)
-        Y_base_folds.append(pred)
-    Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-    theta = est.const_marginal_ate()
-
-    # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
-    return Y_base + T_df_test @ theta.T
-
-
 def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                                  p_max=5,  # maximum number of lags
                                                  model_y_name='extra_trees',
@@ -410,10 +310,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                                  lookback_days=252*4,  # 4 years of daily data
                                                  days_valid=20,  # 1 month validation set
                                                  error_metric='rmse',
-                                                 max_threads=1):
-
-    start_exec_time = time.time()
-    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                                                 max_threads=12):
 
     if model_y_params is None:
         model_y_params = {}
@@ -432,24 +329,74 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
         raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
 
+    ###################### Isaac's Refactored Code ########################################################################################
+
     runs_configs_list = []
     for day_idx in range(test_start, num_days):
         for p in range(1, p_max + 1):
             for valid_shift in range(days_valid):
                 runs_configs_list.append((day_idx, p, valid_shift))
 
-
     # IZ: This main loop can be parallelized across the list of run configurations, i.e. (day, p, shift) tuples
     # It should return a list of results of the error metric for each of those
     # TODO: Parallelize this
-    print("Beginning search for optimal VAR order for each day")
-    with Pool(max_threads) as pool:
-        error_metric_results = pool.starmap(
-            evaluate_training_run, 
-            [(curr_cfg, asset_df, confound_df, lookback_days, days_valid, 
-            model_y_name, model_y_params, model_t_name, model_t_params, 
-            cv_folds, error_metric) for curr_cfg in runs_configs_list]
+    error_metric_results = []
+    for cfg_idx, curr_cfg in enumerate(runs_configs_list):
+        (day_idx, p, valid_shift) = curr_cfg
+        
+        # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
+        # Only print the status once per day combination
+        if (p==1 and valid_shift==0 and day_idx%10==0):
+            print("Performing parameter search for day", day_idx, "out of", num_days, "days in the dataset.")
+        # First, we perform a parameter search for the optimal p.
+        train_start = max(0, day_idx - lookback_days)   # e.g. 0
+        train_end = day_idx - days_valid - 1            # e.g. 1008 - 20 - 1 = 987
+        valid_start = train_end + 1                     # e.g. 988
+        valid_end = valid_start + days_valid - 1        # e.g. 988 + 20 - 1 = 1007; total length = 20
+
+        # e.g. valid_shift = 0, 19
+        start_idx = train_start + valid_shift    # e.g. 0 + 0, 0 + 19 = 19
+        end_idx = train_end + valid_shift + 2    # e.g. 987 + 0 + 2, 987 + 19 + 2 = 1008 (usually excluded)
+        # + 2 is to account for the fact that python slicing excludes the last element, and
+        # we need to set aside the element at the last index of the train set for validation.
+
+        # Create lagged treatment variables
+        # Recall that columns are days, and rows are tickers
+        Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
+        W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
+        T_df_lagged = make_lags(Y_df_lagged, p)
+        Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
+        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
+        Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
+        # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for
+        #  validation, so we have 19:1006 (1006 included) for training and 1007 for "internal validation".
+
+        est = LinearDML(
+            model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+            model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+            cv=TimeSeriesSplit(n_splits=cv_folds),
+            discrete_treatment=False,
+            random_state=0
         )
+        est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
+
+        # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
+
+        # The structure is: est.models_y[0] contains the 5 CV fold models
+        Y_base_folds = []
+        for model in est.models_y[0]:
+            # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
+            pred = model.predict(W_df_test)
+            Y_base_folds.append(pred)
+
+        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
+        theta = est.const_marginal_ate()
+        Y_hat_next = Y_base + T_df_test @ theta.T
+
+        if error_metric == 'rmse':
+            # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
+            error_metric_results.append(root_mean_squared_error(Y_df_test, Y_hat_next))
+
 
     # IZ: Load the run configurations and error metric results into a dataframe for aggregation
     runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)], 
@@ -469,21 +416,49 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     for (day_idx, p_opt) in day_p_opt_tuples:
         # print((day_idx, p_opt))
         p_optimal[day_idx-test_start] = p_opt
-    
-    print("Completed VAR order search")
-    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
+
 
     
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
     # TODO: Parallelize this
-    print("Computing daily predictions using the observed optimal VAR order")
-    with Pool(max_threads) as pool:
-        Y_hat_next_store = pool.starmap(
-            evaluate_prediction,
-            [(day_idx, asset_df, confound_df, lookback_days, p_opt, 
-            model_y_name, model_y_params, model_t_name, model_t_params, cv_folds) 
-            for day_idx in range(test_start, num_days)]
-    )
+    for day_idx in range(test_start, num_days):
+        if day_idx%10==0:
+            print("Performing prediction for day", day_idx, "out of", num_days, "days in the dataset.")
+
+        # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
+        # IZ: Recalculate indices for the full lookback window
+        final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
+        final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
+        
+        Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
+        W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
+        T_df_lagged = make_lags(Y_df_lagged, p_opt)
+        Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
+        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
+        Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
+        est = LinearDML(
+            model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+            model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+            cv=TimeSeriesSplit(n_splits=cv_folds),
+            discrete_treatment=False,
+            random_state=0
+        )
+        est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
+
+        # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
+
+        # The structure is: est.models_y[0] contains the 5 CV fold models
+        Y_base_folds = []
+        for model in est.models_y[0]:
+            # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
+            pred = model.predict(W_df_test)
+            Y_base_folds.append(pred)
+        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
+        theta = est.const_marginal_ate()
+
+        # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
+        Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
+
 
     result = {
         'test_start': test_start,
@@ -491,10 +466,6 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         'p_optimal': p_optimal,
         'Y_hat_next_store': Y_hat_next_store,
     }
-
-    print("Completed predictions")
-    print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
     return result
 
