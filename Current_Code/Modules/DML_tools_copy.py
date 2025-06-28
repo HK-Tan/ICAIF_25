@@ -141,7 +141,7 @@ def calculate_weighted_cluster_portfolio_returns(
 
     # Calculate all cluster centroids at once using groupby
     # T -> Transpose so assets are rows for easy grouping
-    centroids_df = asset_returns_df.T.groupby(labels).mean().T
+    centroids_df = asset_returns_df.groupby(labels, axis=1).mean()
 
     # Create a DataFrame aligned with original returns, where each column is the
     # appropriate centroid for that asset. This prepares for vectorized subtraction.
@@ -177,7 +177,7 @@ def calculate_weighted_cluster_portfolio_returns(
     weighted_asset_returns = (np.exp(asset_returns_df) - 1) * normalized_weights
 
     # Sum the weighted returns for each cluster using groupby
-    cluster_returns_df = np.log(1 + weighted_asset_returns.T.groupby(labels).sum().T)
+    cluster_returns_df = np.log(1 + weighted_asset_returns.groupby(labels, axis=1).sum())
 
     return cluster_returns_df
 
@@ -458,7 +458,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
     num_days = whole_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
 
-    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
+    p_optimal = np.zeros(num_days - test_start, dtype=int)  # Store optimal p for each day in the test set
     Y_hat_next_store = np.zeros((num_days - test_start, k))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
@@ -514,7 +514,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
     with Pool(max_threads) as pool:
         Y_hat_next_store = pool.starmap(
             evaluate_prediction,
-            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx],
+            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx-test_start],
             model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
             for day_idx in range(test_start, num_days)]
     )
