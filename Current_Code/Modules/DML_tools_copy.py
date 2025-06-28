@@ -14,6 +14,9 @@ from scipy import sparse
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import matplotlib.dates as mdates
+from multiprocessing import Pool
+import time
+from datetime import datetime
 from tqdm import tqdm
 
 try:
@@ -138,7 +141,7 @@ def calculate_weighted_cluster_portfolio_returns(
 
     # Calculate all cluster centroids at once using groupby
     # T -> Transpose so assets are rows for easy grouping
-    centroids_df = asset_returns_df.T.groupby(labels).mean().T
+    centroids_df = asset_returns_df.groupby(labels, axis=1).mean()
 
     # Create a DataFrame aligned with original returns, where each column is the
     # appropriate centroid for that asset. This prepares for vectorized subtraction.
@@ -174,7 +177,7 @@ def calculate_weighted_cluster_portfolio_returns(
     weighted_asset_returns = (np.exp(asset_returns_df) - 1) * normalized_weights
 
     # Sum the weighted returns for each cluster using groupby
-    cluster_returns_df = np.log(1 + weighted_asset_returns.T.groupby(labels).sum().T)
+    cluster_returns_df = np.log(1 + weighted_asset_returns.groupby(labels, axis=1).sum())
 
     return cluster_returns_df
 
@@ -377,6 +380,155 @@ def rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
         'p_optimal': p_optimal,
         'Y_hat_next_store': Y_hat_next_store,
     }
+
+    return result
+
+# IZ: Function definition for a single training error evaluation, used for parallelization
+def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_valid,
+                    model_y_name, model_y_params, model_t_name, model_t_params,
+                    cv_folds, error_metric):
+
+    (day_idx, p, valid_shift) = curr_cfg
+
+    # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
+    train_start = max(0, day_idx - lookback_days)   # e.g. 0
+    train_end = day_idx - days_valid - 1            # e.g. 1008 - 20 - 1 = 987
+    valid_start = train_end + 1                     # e.g. 988
+    valid_end = valid_start + days_valid - 1        # e.g. 988 + 20 - 1 = 1007; total length = 20
+
+    # e.g. valid_shift = 0, 19
+    start_idx = train_start + valid_shift    # e.g. 0 + 0, 0 + 19 = 19
+    end_idx = train_end + valid_shift + 2    # e.g. 987 + 0 + 2, 987 + 19 + 2 = 1008 (usually excluded)
+    # + 2 is to account for the fact that python slicing excludes the last element, and
+    # we need to set aside the element at the last index of the train set for validation.
+
+    # Create lagged treatment variables
+    # Recall that columns are days, and rows are tickers
+    Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
+    W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
+    Y_df_test = Y_df_lagged.iloc[-1:,:]
+    # In the last value of valid_shift = 19, then 19:1007 (1007 included) but we took out the 1007th element for
+    #  validation, so we have 19:1006 (1006 included) for training and 1007 for "internal validation".
+    Y_hat_next = fit_and_predict(Y_df_lagged, W_df_lagged, p, model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
+
+    if error_metric == 'rmse':
+        # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
+        return root_mean_squared_error(Y_df_test, Y_hat_next)
+    else:
+        raise ValueError("Unsupported error metric.")
+
+
+# IZ: Function definition for a single future prediction (using found optimal p), used for parallelization
+def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt,
+                    model_y_name, model_y_params, model_t_name, model_t_params, cv_folds):
+
+    # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
+    # IZ: Recalculate indices for the full lookback window
+    final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
+    final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
+
+    Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
+    W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
+    return fit_and_predict(Y_df_lagged, W_df_lagged, p_opt, model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
+
+
+def parallel_rolling_window_OR_VAR_w_para_search(whole_df, confound_df,
+                                                 p_max=5,  # maximum number of lags
+                                                 k = 20, # number of clusters
+                                                 model_y_name='extra_trees',
+                                                 model_t_name='extra_trees',
+                                                 model_y_params=None,
+                                                 model_t_params=None,
+                                                 cv_folds=5,
+                                                 lookback_days=252*4,  # 4 years of daily data
+                                                 days_valid=20,  # 1 month validation set
+                                                 error_metric='rmse',
+                                                 max_threads=1):
+
+    start_exec_time = time.time()
+    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if model_y_params is None:
+        model_y_params = {}
+    if model_t_params is None:
+        model_t_params = {}
+
+
+    test_start = lookback_days  # Start of the test set after training and validation
+    num_days = whole_df.shape[0] - 1  # Total number of days in the dataset,
+                                  # minus one day off since we cannot train on the last day
+
+    p_optimal = np.zeros(num_days - test_start, dtype=int)  # Store optimal p for each day in the test set
+    Y_hat_next_store = np.zeros((num_days - test_start, k))
+    #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
+
+    asset_df = calculate_weighted_cluster_portfolio_returns(whole_df, lookback_days, k, .05)
+
+    if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
+        raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
+
+    runs_configs_list = []
+    for day_idx in range(test_start, num_days):
+        for p in range(1, p_max + 1):
+            for valid_shift in range(days_valid):
+                runs_configs_list.append((day_idx, p, valid_shift))
+
+
+    # IZ: This main loop can be parallelized across the list of run configurations, i.e. (day, p, shift) tuples
+    # It should return a list of results of the error metric for each of those
+    # TODO: Parallelize this
+    print("Beginning search for optimal VAR order for each day")
+    with Pool(max_threads) as pool:
+        error_metric_results = pool.starmap(
+            evaluate_training_run,
+            [(curr_cfg, asset_df, confound_df, lookback_days, days_valid,
+            model_y_name, model_y_params, model_t_name, model_t_params,
+            cv_folds, error_metric) for curr_cfg in runs_configs_list]
+        )
+
+    # IZ: Load the run configurations and error metric results into a dataframe for aggregation
+    runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)],
+                           columns=["day_idx", "p", "valid_shift", "error_metric"])
+    # Group by day_index and p to get the cumulative errors per day/p combination over the training set
+    runs_df_sum_error = runs_df.groupby(['day_idx', 'p']).sum()
+    # Now group by the day index again to find the p value that gives minimum train error
+    # First find the df indices corresponding to the minimum error rows per day_idx
+    p_opt_indices = runs_df_sum_error.groupby('day_idx')['error_metric'].idxmin()
+    # Take those indices from the original dataframe, and convert to a list of tuples of (day_idx, p_opt)
+    runs_df_p_opt = runs_df_sum_error.loc[p_opt_indices]
+    day_p_opt_tuples = runs_df_p_opt.index.tolist()
+
+    print("Per-day optimal VAR order (p) and corresponding validation error:")
+    print(runs_df_p_opt.reset_index().values.tolist())
+
+    for (day_idx, p_opt) in day_p_opt_tuples:
+        # print((day_idx, p_opt))
+        p_optimal[day_idx-test_start] = p_opt
+
+    print("Completed VAR order search")
+    print(f"Total elapsed time: {time.time()-start_exec_time:.4f} seconds")
+
+
+    # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
+    print("Computing daily predictions using the observed optimal VAR order")
+    with Pool(max_threads) as pool:
+        Y_hat_next_store = pool.starmap(
+            evaluate_prediction,
+            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx-test_start],
+            model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
+            for day_idx in range(test_start, num_days)]
+    )
+
+    result = {
+        'test_start': test_start,
+        'num_days': num_days,
+        'p_optimal': p_optimal,
+        'Y_hat_next_store': Y_hat_next_store,
+    }
+
+    print("Completed predictions")
+    print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
     return result
 
