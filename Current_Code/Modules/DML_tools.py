@@ -265,7 +265,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         # Recalculate indices for the full lookback window
         final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
         final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
-        
+
         Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
         W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
         T_df_lagged = make_lags(Y_df_lagged, p_opt)
@@ -303,10 +303,10 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     return result
 
 # IZ: Function definition for a single training error evaluation, used for parallelization
-def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_valid, 
-                    model_y_name, model_y_params, model_t_name, model_t_params, 
+def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_valid,
+                    model_y_name, model_y_params, model_t_name, model_t_params,
                     cv_folds, error_metric):
-    
+
     (day_idx, p, valid_shift) = curr_cfg
 
     # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
@@ -359,10 +359,10 @@ def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_v
         return root_mean_squared_error(Y_df_test, Y_hat_next)
     else:
         raise ValueError("Unsupported error metric.")
-    
+
 
 # IZ: Function definition for a single future prediction (using found optimal p), used for parallelization
-def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt, 
+def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt,
                     model_y_name, model_y_params, model_t_name, model_t_params, cv_folds):
 
     # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
@@ -446,14 +446,14 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     print("Beginning search for optimal VAR order for each day")
     with Pool(max_threads) as pool:
         error_metric_results = pool.starmap(
-            evaluate_training_run, 
-            [(curr_cfg, asset_df, confound_df, lookback_days, days_valid, 
-            model_y_name, model_y_params, model_t_name, model_t_params, 
+            evaluate_training_run,
+            [(curr_cfg, asset_df, confound_df, lookback_days, days_valid,
+            model_y_name, model_y_params, model_t_name, model_t_params,
             cv_folds, error_metric) for curr_cfg in runs_configs_list]
         )
 
     # IZ: Load the run configurations and error metric results into a dataframe for aggregation
-    runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)], 
+    runs_df = pd.DataFrame([(*cfg,err) for cfg,err in zip(runs_configs_list,error_metric_results)],
                            columns=["day_idx", "p", "valid_shift", "error_metric"])
     # Group by day_index and p to get the cumulative errors per day/p combination over the training set
     runs_df_sum_error = runs_df.groupby(['day_idx', 'p']).sum()
@@ -470,18 +470,18 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     for (day_idx, p_opt) in day_p_opt_tuples:
         # print((day_idx, p_opt))
         p_optimal[day_idx-test_start] = p_opt
-    
+
     print("Completed VAR order search")
     print(f"Total elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
-    
+
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
     print("Computing daily predictions using the observed optimal VAR order")
     with Pool(max_threads) as pool:
         Y_hat_next_store = pool.starmap(
             evaluate_prediction,
-            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx], 
-            model_y_name, model_y_params, model_t_name, model_t_params, cv_folds) 
+            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx],
+            model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
             for day_idx in range(test_start, num_days)]
     )
 
