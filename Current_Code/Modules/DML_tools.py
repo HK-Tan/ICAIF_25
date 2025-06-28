@@ -306,6 +306,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_valid, 
                     model_y_name, model_y_params, model_t_name, model_t_params, 
                     cv_folds, error_metric):
+    
     (day_idx, p, valid_shift) = curr_cfg
 
     # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
@@ -475,7 +476,6 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
-    # TODO: Parallelize this
     print("Computing daily predictions using the observed optimal VAR order")
     with Pool(max_threads) as pool:
         Y_hat_next_store = pool.starmap(
