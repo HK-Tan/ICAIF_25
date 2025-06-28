@@ -480,7 +480,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     with Pool(max_threads) as pool:
         Y_hat_next_store = pool.starmap(
             evaluate_prediction,
-            [(day_idx, asset_df, confound_df, lookback_days, p_opt, 
+            [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx], 
             model_y_name, model_y_params, model_t_name, model_t_params, cv_folds) 
             for day_idx in range(test_start, num_days)]
     )
