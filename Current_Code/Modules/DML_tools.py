@@ -49,7 +49,7 @@ from datetime import datetime
 # Helper function to make lagged copies of a DataFrame
 def make_lags(df, p):
     """
-    Create lagged copies of a DataFrame.
+    Create lagged copies of a DataFrame (withtout the original columns; ie starting from lag 1).
 
     Parameters:
     df (pd.DataFrame): The input DataFrame.
@@ -270,8 +270,8 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
         T_df_lagged = make_lags(Y_df_lagged, p_opt)
         Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-        Y_df_test , T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
+        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:,:], T_df_lagged.iloc[:,:], W_df_lagged.iloc[:,:]
+        Y_df_test, T_df_test, W_df_test = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
         est = LinearDML(
             model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
             model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
@@ -298,6 +298,317 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         'num_days': num_days,
         'p_optimal': p_optimal,
         'Y_hat_next_store': Y_hat_next_store,
+    }
+
+    return result
+
+
+def create_index_mapping(T_names_prev, T_names_post, d_y):
+    """
+    Create index mapping as 2-tuples (pre_idx, post_idx) for coefficient comparison.
+
+    Inputs:
+    - T_names_prev: List of treatment variable names from the previous coefficients.
+    - T_names_post: List of treatment variable names from the post coefficients.
+    - d_y: Number of assets (ie outcome) in the model, placed as the outcome variables.
+
+    Returns:
+    - idx_pairs: List of (pre_idx, post_idx) tuples for existing coefficients
+        i.e. Of the previous coefficients, which ones do they map to in the post coefficients?
+    - idx_new: List of post_idx for new coefficients
+    """
+    d_T_prev = len(T_names_prev)
+    d_T_post = len(T_names_post)
+
+    idx_pairs = []
+    idx_new = []
+
+    # Create mapping for all coefficients
+    for y in range(d_y):
+        for j_post, name_post in enumerate(T_names_post):
+            post_idx = y * d_T_post + j_post
+            if name_post in T_names_prev:
+                # This is an existing coefficient
+                j_prev = T_names_prev.index(name_post)
+                pre_idx = y * d_T_prev + j_prev
+                idx_pairs.append((pre_idx, post_idx))
+            else:
+                # If not, then this is a new coefficient
+                idx_new.append(post_idx)
+    
+    return idx_pairs, idx_new
+
+def rolling_window_ORACLE_VAR(asset_df, confound_df,
+                                        p_max=5,  # maximum number of lags
+                                        model_y_name='extra_trees',
+                                        model_t_name='extra_trees',
+                                        model_y_params=None,
+                                        model_t_params=None,
+                                        cv_folds=5,
+                                        lookback_days=252*4,  # 4 years of daily data
+                                        significance_level=0.15,  # Significance level for p-value testing
+                                        error_metric='rmse'):
+    """
+    THe purpose of this function is to run a rolling window evaluation
+    using ORACLE-VAR. The idea is that we will always run this via orthongalized regression
+    framework under DML. To determine the optimal value of p, we perform a multiple-hypothesis testing
+    approach iteratively as described in the paper. This removes the need to obtain validation error, and
+    instead, we will be looking at the p-values and specify a given significance level.
+
+    This is best illustrated with a concrete example:
+
+    Suppose we have a lookback window of 252*4 days (i.e. 4 years of daily data). We do this process iteratively
+    by first assuming that p = 1, so we assign the following variables:
+    
+    Treatment = asset_lag1
+    Outcome = asset_lag0
+    Confounding = confound_lag1, confound_lag2
+
+    Next, we start by appending asset_lag2 to Treatment, and look at the p-value of the new coefficient block
+    between asset_lag2 and asset_lag0 (for testing if these coefficients are zero). If the p-value is less than the 
+    significance level, we keep asset_lag2 in the model. Otherwise, we test to see if the coefficients for the 
+    previous treatment variable (asset_lag1) has been changed. If so, we instead move asset_lag2 to the confounding variables.
+
+    Hence, if p_value > significance_level, for both cases, the algorithm terminates and we keep the current p value
+    with the relevant assignment of treatment, and confounding variables. If not, repeat the process by appending
+    confound_lag3 to the confounding variables, and testing the p-values of the coefficients for testing asset_lag3
+    in the treatment variable (note that asset_lag0 is always the outcome variable).
+    
+    Remark 1: significance_level is a hyperparameter that we can set to control the false discovery rate/family-wise error rate.
+        By default, we set it to 0.15, which is a common value used in practice for "discovery"-style/feature selection tasks.
+
+    Remark 2: The code will assume that no validation set is needed, and that the entire lookback window is used for training.
+
+    Inputs:
+
+    asset_df: DataFrame of asset returns (outcome variable)
+    confound_df: DataFrame of confounding variables (confounding variables)
+    p_max: A hyperparameter representing the maximum number of lags to consider (e.g. 5) before we 
+        terminate the iterative algorithm (though it is possible for one iteration to terminate before 5).
+    model_y_name: Name of the regressor to use for the outcome variable (e.g. 'extra_trees').
+    model_t_name: Name of the regressor to use for the treatment variable (e.g. 'extra_trees').
+    model_y_params: Dictionary of parameters for the outcome regressor.
+    model_t_params: Dictionary of parameters for the treatment regressor.
+    cv_folds: Number of cross-validation folds to use.
+    lookback_days: Number of days to use for the lookback window
+        (e.g. 252*4; assume that this is valid ie data set has more than 4 years worth of daily data).
+    significance_level: Significance level for p-value testing (e.g. 0.15).
+    error_metric: Metric to use for validation (e.g. 'rmse' or 'pnl').
+
+    Outputs:
+
+    test_start: The starting index of the test set.
+    num_days: The total number of days in the dataset.
+    p_optimal: The optimal value of p that minimizes the validation error at the end of the lookback window,
+        for each day (hence be a vector of length num_days - test_start).
+    """
+
+    if model_y_params is None:
+        model_y_params = {}
+    if model_t_params is None:
+        model_t_params = {}
+
+
+    test_start = lookback_days  # Start of the test set after training and validation
+    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
+                                  # minus one day off since we cannot train on the last day
+    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
+    which_lag_control = np.zeros((num_days - test_start, p_max))  # Store which lag is in the control set for each day
+    which_lag_treatment = np.zeros((num_days - test_start, p_max))  # Store which lag is in the treatment set for each day
+    which_lag_treatment[:,0] = 1  # The first lag is always in treatment variable  (rows = days, columns = lags)
+    Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
+
+    if len(asset_df) < lookback_days + 1:
+        raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
+
+    for day_idx in range(test_start, num_days):
+        # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
+        print("It is day", day_idx, "out of", num_days, "days in the dataset.")
+        
+        ###########################################################
+        ### Training Part
+        ###########################################################
+        train_start = max(0, day_idx - lookback_days)   # e.g. 0
+        train_end = day_idx - 1            # e.g. 1008 - 1 = 1007
+
+        # Outcome; same for both pre and post models
+        Y_df_lagged = asset_df.iloc[train_start:train_end+1,:].copy()  
+            # + 1 so that the last day is included, day of index 1007 (1008th day)
+        
+        # Confounding variables; same for both pre and post models
+        W_df_lagged = make_lags(confound_df.iloc[train_start:train_end+1,:], 1)
+
+        ### Initializing the pre model outside of the loop (before p = 2)
+        T_df_pre_lagged = make_lags(asset_df.iloc[train_start:train_end+1,:].copy(), 1)
+        Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_lagged)
+
+        """
+        At this stage, (p = 1), we have the following variables:
+
+        Pre Model: 
+        Treatment = asset_lag1
+        Outcome = asset_lag0
+        Control/Confounding = confound_lag1
+        """
+
+        for p in range(2, p_max + 1):
+
+            ##### Starting value, p = 2 (though this loops till p = 5 unless terminated early)
+
+            """
+            Pre Model (Asumming p = 2): 
+            Treatment = asset_lag1
+            Outcome = asset_lag0
+            Control/Confounding = confound_lag1, confound_lag2
+
+            Post Model (Asumming p = 2):
+            Treatment = asset_lag1, asset_lag2
+            Outcome = asset_lag0
+            Control/Confounding = confound_lag1, confound_lag2
+            """
+
+            W_df_pre_lagged = pd.concat([
+                W_df_pre_lagged,
+                confound_df.iloc[train_start:train_end+1,:].shift(p).add_suffix(f'_lag{p}')
+            ], axis=1)
+        
+            # Confounding variables for post model are the same as pre-model initially
+            W_df_post_lagged = W_df_pre_lagged.copy()
+
+            # Note that T_df_pre_lagged is already created at the end of the hypothesis testing loops
+            #   and was designed to be carried over to the next iteration here.
+
+            # Create post-model treatment variables (pre + current lag p)
+            T_df_post_lagged = pd.concat([
+                T_df_pre_lagged,
+                asset_df.iloc[train_start:train_end+1,:].shift(p).add_suffix(f'_lag{p}')
+            ], axis=1)
+
+            # Realign models
+            Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_pre_lagged)
+            Y_df_post_lagged, T_df_post_lagged, W_df_post_lagged = realign(Y_df_lagged, T_df_post_lagged, W_df_post_lagged)
+            # Note that the first argument is Y_df_lagged, no pre or post so that we can realign the data
+            #   properly with the NaN introduced by the shift operation.
+            
+            ### Pre Model
+            est_pre = LinearDML(
+                model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+                model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+                cv=TimeSeriesSplit(n_splits=cv_folds),
+                discrete_treatment=False,
+                random_state=0
+            )
+
+            est_pre.fit(Y_df_pre_lagged, T_df_pre_lagged, X=None, W=W_df_pre_lagged, inference=StatsModelsInference())
+            est_pre_inf = est_pre.const_marginal_ate_inference()
+            theta_pre = est_pre_inf.mean_point.ravel()  # Flatten to 1-D vector
+            cov_pre = est_pre_inf.mean_pred_stderr.ravel()
+
+            ### Post Model
+            est_post = LinearDML(
+                model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+                model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+                cv=TimeSeriesSplit(cv_folds),
+                discrete_treatment=False,
+                random_state=0,
+            )
+
+            est_post.fit(Y_df_post_lagged, T_df_post_lagged, X=None, W=W_df_post_lagged, inference=StatsModelsInference())
+            est_post_inf = est_post.const_marginal_ate_inference()
+            theta_post = est_post_inf.mean_point.ravel()  # Flatten to 1-D vector
+            cov_post = est_post_inf.mean_pred_stderr.ravel()
+            
+            T_names_pre = T_df_pre_lagged.columns.tolist()
+            T_names_post = T_df_post_lagged.columns.tolist()
+            d_y   = asset_df.shape[1]                    # number of outcome series
+
+            idx_pairs, idx_post = create_index_mapping(T_names_pre, T_names_post, d_y)
+
+            # Within each test, we perform a Benjamini–Hochberg FDR test
+            # p-values of signifinance
+            p_sig_store = []
+            for i in idx_post:
+                z_stat = theta_post[i] / cov_post[i]
+                p_value = 2 * (1 - norm.cdf(np.abs(z_stat)))
+                p_sig_store.append(p_value)
+            p_sig = min(multipletests(p_sig_store, alpha=0.05, method="fdr_bh")[1])
+            print(p_sig)
+
+            # p-value of drift without significance
+            p_drift_store = []
+            for i,j in idx_pairs:
+                z_stat = (theta_post[j] - theta_pre[i])/ np.sqrt(cov_post[j]**2 + cov_pre[i]**2)
+                p_value = 2 * (1 - norm.cdf(np.abs(z_stat)))
+                p_drift_store.append(p_value)
+            p_drift = min(multipletests(p_drift_store, alpha=0.05, method="fdr_bh")[1])
+            print(p_drift)
+
+            # Case 1: Significance of new coefficients
+            if p_sig < significance_level:
+                print(f"✓ Significance detected for lag {p} (p-value: {p_sig:.4f})")
+                which_lag_treatment[day_idx-test_start, p] = 1  # Mark this lag as treatment
+                T_df_pre_lagged = T_df_post_lagged
+                Y_df_pre_lagged = Y_df_post_lagged
+                W_df_pre_lagged = W_df_post_lagged
+                continue
+
+            # Case 2: Drift without Significance
+            elif p_drift < significance_level:
+                print(f"✓ Drift detected for lag {p} (p-value: {p_drift:.4f})")
+                which_lag_control[day_idx-test_start, p] = 1  # Mark this lag as control/confounding
+                # Shift the treatment variable to the confounding
+                # First, create that asset_lagged variable with just lag p assets
+                asset_lag_p = asset_df.iloc[train_start:train_end+1,:].shift(p).add_suffix(f'_lag{p}')
+                W_df_pre_lagged = pd.concat([W_df_pre_lagged, asset_lag_p], axis=1)
+                Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_pre_lagged)
+                # Note that the first argument is Y_df_lagged, no pre or post so that we can realign the data
+                #   properly with the NaN introduced by the shift operation.
+                # Furthermore, we do not need to update the T_df_pre_lagged since that was before we added 
+                #   the asset_lag_p variable (as seen from above, we have added it to W_df_pre_lagged instead).
+                continue
+
+            # Case 3: Neither
+            else:   
+                print(f"✗ No significance or drift for lag {p} (p_sig: {p_sig:.4f}, p_drift: {p_drift:.4f})")
+                p_optimal[day_idx - test_start] = p - 1  # Store the optimal p for this day (this p didn't pass so p - 1))
+                break
+
+        ###########################################################
+        ### Prediction Part
+        ###########################################################
+
+        # In all the cases, we have the final pre-model with the optimal p value. Hence, these will be used
+        #   to make the predictions.
+
+        # Re-initialize the final pre-model with the optimal p value
+        est = LinearDML(
+            model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+            model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+            cv=TimeSeriesSplit(n_splits=cv_folds),
+            discrete_treatment=False,
+            random_state=0
+        )
+        est.fit(Y_df_pre_lagged, T_df_pre_lagged, X=None, W=W_df_pre_lagged)
+
+        # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
+        Y_df_test, T_df_test, W_df_test = Y_df_pre_lagged.iloc[-1:,:], T_df_pre_lagged.iloc[-1:,:], W_df_pre_lagged.iloc[-1:,:]
+        # The structure is: est.models_y[0] contains the 5 CV fold models
+        Y_base_folds = []
+        for model in est.models_y[0]:
+            # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
+            pred = model.predict(W_df_test)
+            Y_base_folds.append(pred)
+        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
+        theta = est.const_marginal_ate()
+        Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_test @ theta.T
+
+    result = {
+        'test_start': test_start,
+        'num_days': num_days,
+        'p_optimal': p_optimal,
+        'Y_hat_next_store': Y_hat_next_store,
+        'which_lag_control': which_lag_control,
+        'which_lag_treatment': which_lag_treatment,
     }
 
     return result
