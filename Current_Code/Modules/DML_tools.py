@@ -451,6 +451,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         Control/Confounding = confound_lag1
         """
 
+        last_valid_p = 1
         for p in range(2, p_max + 1):
 
             ##### Starting value, p = 2 (though this loops till p = 5 unless terminated early)
@@ -508,7 +509,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
             est_post = LinearDML(
                 model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
                 model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-                cv=TimeSeriesSplit(cv_folds),
+                cv=TimeSeriesSplit(n_splits=cv_folds),
                 discrete_treatment=False,
                 random_state=0,
             )
@@ -546,16 +547,17 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
             # Case 1: Significance of new coefficients
             if p_sig < significance_level:
                 print(f"✓ Significance detected for lag {p} (p-value: {p_sig:.4f})")
-                which_lag_treatment[day_idx-test_start, p] = 1  # Mark this lag as treatment
+                which_lag_treatment[day_idx-test_start, p-1] = 1  # Mark this lag as treatment
                 T_df_pre_lagged = T_df_post_lagged
                 Y_df_pre_lagged = Y_df_post_lagged
                 W_df_pre_lagged = W_df_post_lagged
+                last_valid_p = p
                 continue
 
             # Case 2: Drift without Significance
             elif p_drift < significance_level:
                 print(f"✓ Drift detected for lag {p} (p-value: {p_drift:.4f})")
-                which_lag_control[day_idx-test_start, p] = 1  # Mark this lag as control/confounding
+                which_lag_control[day_idx-test_start, p-1] = 1  # Mark this lag as control/confounding
                 # Shift the treatment variable to the confounding
                 # First, create that asset_lagged variable with just lag p assets
                 asset_lag_p = asset_df.iloc[train_start:train_end+1,:].shift(p).add_suffix(f'_lag{p}')
@@ -565,14 +567,16 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
                 #   properly with the NaN introduced by the shift operation.
                 # Furthermore, we do not need to update the T_df_pre_lagged since that was before we added 
                 #   the asset_lag_p variable (as seen from above, we have added it to W_df_pre_lagged instead).
+                last_valid_p = p
                 continue
 
             # Case 3: Neither
             else:   
                 print(f"✗ No significance or drift for lag {p} (p_sig: {p_sig:.4f}, p_drift: {p_drift:.4f})")
-                p_optimal[day_idx - test_start] = p - 1  # Store the optimal p for this day (this p didn't pass so p - 1))
+                last_valid_p = p - 1  # Store the optimal p for this day (this p didn't pass so p - 1))
                 break
-
+        
+        p_optimal[day_idx - test_start] = last_valid_p  # Store the optimal p for this day            
         ###########################################################
         ### Prediction Part
         ###########################################################
