@@ -289,9 +289,12 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
         theta = est.const_marginal_ate()
         Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_pred @ theta.T
-        # 1009 to 1299, so 291 days; last index is 1298 - 1008 = 290 (hence consistent).
+        # 0th row -> day_idx = 1008, 1st row -> day_idx = 1009, etc.
+        # ... last = 1298 - 1008 = 290th  row -> day_idx = 1298
+        # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
+        #   so this is consistent!
     result = {
-        'test_start': test_start,
+        'test_start': test_start, 
         'num_days': num_days,
         'p_optimal': p_optimal,
         'Y_hat_next_store': Y_hat_next_store,
@@ -624,7 +627,10 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
         theta = est.const_marginal_ate()
         Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_pred @ theta.T
-
+        # 0th row -> day_idx = 1008, 1st row -> day_idx = 1009, etc.
+        # ... last = 1298 - 1008 = 290th  row -> day_idx = 1298
+        # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
+        #   so this is consistent!
     result = {
         'test_start': test_start,
         'num_days': num_days,
