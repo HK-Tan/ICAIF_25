@@ -40,6 +40,7 @@ def make_lags(df, p):
     Returns:
     pd.DataFrame: A DataFrame with lagged columns.
     """
+    if not isinstance(p, int): raise ValueError(f"Value of p for computing lags must be an integer, acutal value is p={p}")
     return pd.concat([df.shift(k).add_suffix(f'_lag{k}') for k in range(1, p+1)], axis=1)
 
 def make_lags_with_orginal(df, p):
@@ -698,6 +699,9 @@ def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_v
 def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt,
                     model_y_name, model_y_params, model_t_name, model_t_params, cv_folds):
 
+    # IZ: Force p_opt to an integer to prevent any issues with indexing in the make_lag function
+    p_opt = int(p_opt)
+
     # IZ: Once we have determined the optimal p value, we now fit with "today's" data set
     # IZ: Recalculate indices for the full lookback window
     final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
@@ -759,7 +763,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
 
-    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
+    p_optimal = np.zeros(num_days - test_start, dtype=np.int32)  # Store optimal p for each day in the test set
     Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
     #print("Size of Y_hat_next_store:", Y_hat_next_store.shape)
 
@@ -805,7 +809,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         p_optimal[day_idx-test_start] = p_opt
 
     print("Completed VAR order search")
-    print(f"Total elapsed time: {time.time()-start_exec_time:.4f} seconds")
+    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
 
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
@@ -827,7 +831,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     print("Completed predictions")
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Elapsed time: {time.time()-start_exec_time:.4f} seconds")
+    print(f"Total elapsed time: {time.time()-start_exec_time:.4f} seconds")
 
     return result
 
