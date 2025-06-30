@@ -543,7 +543,6 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
                 p_value = 2 * (1 - norm.cdf(np.abs(z_stat)))
                 p_sig_store.append(p_value)
             p_sig = min(multipletests(p_sig_store, alpha=significance_level, method="fdr_bh")[1])
-            print(p_sig)
 
             # p-value of drift without significance
             p_drift_store = []
@@ -552,7 +551,6 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
                 p_value = 2 * (1 - norm.cdf(np.abs(z_stat)))
                 p_drift_store.append(p_value)
             p_drift = min(multipletests(p_drift_store, alpha=significance_level, method="fdr_bh")[1])
-            print(p_drift)
 
             # Case 1: Significance of new coefficients
             if p_sig < significance_level:
