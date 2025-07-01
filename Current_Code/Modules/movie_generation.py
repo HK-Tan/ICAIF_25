@@ -3,11 +3,139 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy import sparse
+import numba
 import multiprocessing
 import os
 os.chdir('C:/Users/james/ICAIF_25')
 from signet.cluster import Cluster
 os.chdir('C:/Users/james/ICAIF_25/Current_Code/Data')
+
+dpi = 64
+plt.rcParams['figure.dpi'] = dpi
+
+@numba.njit(parallel=True, fastmath=True)
+def fast_corrcoef_numba(A):
+    """
+    Fully-jitted and parallelized implementation of corrcoef with nan_to_num logic.
+    Assumes rowvar=False.
+    """
+    n_rows, n_cols = A.shape
+
+    # 1. Calculate means and de-meaned data in one pass
+    means = np.empty(n_cols, dtype=A.dtype)
+    for j in numba.prange(n_cols): # Parallelize over columns
+        means[j] = A[:, j].mean()
+
+    A_demeaned = A - means
+
+    # 2. Calculate covariance matrix (dot product)
+    #    This is the heaviest part. NumPy's dot often calls optimized BLAS libraries (MKL, OpenBLAS)
+    #    and is hard to beat. We can call it directly from Numba.
+    cov_matrix = A_demeaned.T @ A_demeaned / (n_rows - 1)
+
+    # 3. Calculate standard deviations from the covariance diagonal
+    #    std = sqrt(variance), variance is the diagonal of the covariance matrix
+    variances = np.diag(cov_matrix)
+    stds = np.sqrt(variances)
+
+    # 4. Normalize the covariance matrix to get correlations safely
+    corr_matrix = np.empty_like(cov_matrix)
+    for i in numba.prange(n_cols): # Parallelize the final normalization
+        for j in range(n_cols):
+            denominator = stds[i] * stds[j]
+            if denominator == 0:
+                corr_matrix[i, j] = 0.0
+            else:
+                corr_matrix[i, j] = cov_matrix[i, j] / denominator
+
+    return corr_matrix
+
+@numba.njit
+def set_upper_triangle_nan(arr):
+    """
+    Sets the upper triangle of a 2D array to NaN, in-place.
+    """
+    # Assumes a 2D array
+    rows, cols = arr.shape
+    for i in range(rows):
+        for j in range(i, cols): # Start j from i to include the diagonal
+            arr[i, j] = np.nan
+    return arr
+
+@numba.njit(fastmath=True, parallel=True)
+def reorder_matrix_numba(matrix, order):
+    """
+    Reorders the rows and columns of a square matrix according to the given order.
+    This is a Numba-accelerated equivalent of: matrix[np.ix_(order, order)]
+
+    Args:
+        matrix (np.ndarray): The input 2D square matrix.
+        order (np.ndarray): A 1D array of indices specifying the new order.
+
+    Returns:
+        np.ndarray: The reordered matrix.
+    """
+    n = matrix.shape[0]
+    # Create an empty result matrix with the same shape and dtype
+    reordered_matrix = np.empty_like(matrix)
+
+    # Use prange for parallel execution across the outer loop
+    for i in numba.prange(n):
+        for j in range(n):
+            # The value at new position (i, j) comes from the
+            # original matrix at position (order[i], order[j])
+            reordered_matrix[i, j] = matrix[order[i], order[j]]
+
+    return reordered_matrix
+
+@numba.njit(parallel=True)
+def get_sparse_pos_neg_parts(matrix):
+    """
+    Scans a matrix and returns the components needed to build
+    two sparse matrices: one for positive values and one for
+    the absolute of negative values.
+    """
+    rows, cols = matrix.shape
+    n_elements = matrix.size
+
+    # --- First pass: Count positive and negative elements in parallel ---
+    n_pos = 0
+    n_neg = 0
+    for i in numba.prange(n_elements):
+        row = i // cols
+        col = i % cols
+        val = matrix[row, col]
+        if val > 0:
+            n_pos += 1
+        elif val < 0:
+            n_neg += 1
+
+    # --- Allocate arrays of the exact required size ---
+    pos_data = np.empty(n_pos, dtype=matrix.dtype)
+    pos_rows = np.empty(n_pos, dtype=np.int32)
+    pos_cols = np.empty(n_pos, dtype=np.int32)
+    neg_data = np.empty(n_neg, dtype=matrix.dtype)
+    neg_rows = np.empty(n_neg, dtype=np.int32)
+    neg_cols = np.empty(n_neg, dtype=np.int32)
+
+    # --- Second pass: Populate the arrays ---
+    pos_idx = 0
+    neg_idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            val = matrix[r, c]
+            if val > 0:
+                pos_data[pos_idx] = val
+                pos_rows[pos_idx] = r
+                pos_cols[pos_idx] = c
+                pos_idx += 1
+            elif val < 0:
+                neg_data[neg_idx] = -val # Negate to make it positive
+                neg_rows[neg_idx] = r
+                neg_cols[neg_idx] = c
+                neg_idx += 1
+
+    return (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols)
 
 # --- WORKER FUNCTION ---
 # This function is executed by each parallel process.
@@ -23,45 +151,84 @@ def create_animation_chunk(asset_returns_df,
     Worker function to render a single chunk of the animation without a progress bar.
     Designed to be called by multiprocessing.Pool.
     """
-    asset_names = asset_returns_df.columns
+    asset_returns_np = asset_returns_df.values.astype(np.float32)
+    asset_returns_index = asset_returns_df.index
+    num_assets = asset_returns_df.shape[1]
 
+    # --- Set up the Plot for Animation ---
     fig, ax = plt.subplots(figsize=(10, 8))
-    fig.tight_layout(pad=3.0)
+    fig.tight_layout(pad=3.0) # Add padding for the title
 
-    def update(local_frame_num):
-        global_frame_num = start_frame + local_frame_num
-        ax.clear()
+    # Hide axis ticks permanently. No need to do this in the update loop.
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
-        start_index = global_frame_num
-        end_index = global_frame_num + lookback_period
-        window_df = asset_returns_df.iloc[start_index:end_index]
+    # The animation will run over each possible window in the dataframe
+    num_frames = len(asset_returns_df) - lookback_period
 
-        correlation_matrix_np = np.corrcoef(window_df.values, rowvar=False)
-        correlation_matrix_df = pd.DataFrame(correlation_matrix_np, index=asset_names, columns=asset_names).fillna(0)
+    # Logic for Frame 0
+    initial_window = asset_returns_np[0:lookback_period]
+    initial_corr = fast_corrcoef_numba(initial_window)
+    (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols) = get_sparse_pos_neg_parts(initial_corr)
+    pos_corr = sparse.csc_matrix((pos_data, (pos_rows, pos_cols)), shape=initial_corr.shape)
+    neg_corr = sparse.csc_matrix((neg_data, (neg_rows, neg_cols)), shape=initial_corr.shape)
+    cluster_obj = Cluster((pos_corr, neg_corr))
+    labels = cluster_obj.SPONGE_sym(min(n_clusters_to_form, num_assets))
+    order_indices = np.argsort(labels)
+    reordered_matrix = reorder_matrix_numba(initial_corr, order_indices)
+    initial_matrix_to_plot = set_upper_triangle_nan(reordered_matrix)
 
-        pos_corr = np.maximum(correlation_matrix_df.values, 0)
-        neg_corr = np.maximum(-correlation_matrix_df.values, 0)
-        signet_data = (sparse.csc_matrix(pos_corr), sparse.csc_matrix(neg_corr))
-        effective_n_clusters = min(n_clusters_to_form, window_df.shape[1])
-        cluster_obj = Cluster(signet_data)
-        labels = cluster_obj.SPONGE_sym(effective_n_clusters)
+    # Create the imshow artist and store it in 'im'
+    im = ax.imshow(
+        initial_matrix_to_plot,
+        cmap='bwr',
+        vmin=-1,
+        vmax=1,
+        interpolation='none',
+        animated=True # Important for blitting
+    )
 
-        order_indices = np.argsort(labels)
-        reordered_matrix = correlation_matrix_df.iloc[order_indices, order_indices]
-        mask = np.triu(np.ones_like(reordered_matrix.values, dtype=bool))
-        matrix_to_plot = reordered_matrix.copy()
-        matrix_to_plot.values[mask] = np.nan
+    # Create the title artist and store it in 'title'
+    start_date = asset_returns_index[0].strftime('%Y-%m-%d')
+    end_date = asset_returns_index[lookback_period-1].strftime('%Y-%m-%d')
+    title = ax.set_title(
+        f"Clustered Asset Correlation\n{start_date} to {end_date}",
+        fontsize=16
+    )
 
-        ax.imshow(matrix_to_plot, cmap='viridis', vmin=-1, vmax=1, interpolation='none')
-        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    def update(frame_num):
+      # This function is now much leaner. It only calculates new data
+      # and updates the existing artists. NO ax.clear() or ax.imshow()!
 
-        start_date = window_df.index[0].strftime('%Y-%m-%d')
-        end_date = window_df.index[-1].strftime('%Y-%m-%d')
-        ax.set_title(f"Clustered Asset Correlation\n{start_date} to {end_date}", fontsize=16)
+      start_index = frame_num
+      end_index = frame_num + lookback_period
+      window_np = asset_returns_np[start_index:end_index]
 
-    # Create the animation object for this chunk
-    ani = FuncAnimation(fig, update, frames=num_frames_in_chunk, repeat=False)
+      # --- Run the core calculation logic for the current frame ---
+      correlation_matrix_np = fast_corrcoef_numba(window_np)
+      (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols) = get_sparse_pos_neg_parts(correlation_matrix_np)
+      pos_corr_numba = sparse.csc_matrix((pos_data, (pos_rows, pos_cols)), shape=correlation_matrix_np.shape)
+      neg_corr_numba = sparse.csc_matrix((neg_data, (neg_rows, neg_cols)), shape=correlation_matrix_np.shape)
+      signet_data = (pos_corr_numba, neg_corr_numba)
+      effective_n_clusters = min(n_clusters_to_form, num_assets)
+      cluster_obj = Cluster(signet_data)
+      labels = cluster_obj.SPONGE_sym(effective_n_clusters)
+      order_indices = np.argsort(labels)
+      reordered_matrix_np = reorder_matrix_numba(correlation_matrix_np, order_indices)
+      matrix_to_plot = set_upper_triangle_nan(reordered_matrix_np)
 
+      # --- Update the artist data ---
+      im.set_data(matrix_to_plot) # Update the image data
+
+      start_date = asset_returns_index[start_index].strftime('%Y-%m-%d')
+      end_date = asset_returns_index[end_index-1].strftime('%Y-%m-%d')
+      title.set_text(f"Clustered Asset Correlation\n{start_date} to {end_date}") # Update the title text
+
+      # --- Return a tuple of the modified artists ---
+      # This tells the animation framework which parts of the plot to redraw.
+      return im, title
+
+    # --- Create and Return the Animation Object ---
+    ani = FuncAnimation(fig, update, frames=num_frames, blit=True, repeat=False)
     # --- SAVE WITHOUT PROGRESS BAR ---
     output_filename = f"{output_prefix}_part_{chunk_index}.mp4"
     print(f"Starting to render chunk {chunk_index} ({num_frames_in_chunk} frames)...")
@@ -70,7 +237,12 @@ def create_animation_chunk(asset_returns_df,
     ani.save(
         output_filename,
         writer='ffmpeg',
-        dpi=150
+        dpi=dpi,
+        fps=15,
+        extra_args=[
+        '-vcodec', 'h264_qsv',
+        '-preset', 'veryfast' # QSV also has presets
+    ]
     )
 
     print(f"Finished rendering chunk {chunk_index} -> {output_filename}")
@@ -118,9 +290,9 @@ def create_parallel_animations(
     print("Starting parallel rendering. This may take a while...")
 
     # --- RUN TASKS WITHOUT PROGRESS BAR ---
-    with multiprocessing.Pool(processes=num_threads) as pool:
-        # pool.starmap blocks until all results are ready.
-        # The tqdm wrapper has been removed.
+    # Use maxtasksperchild=1 to force a worker process to restart after each task.
+    # This is highly effective at releasing memory from complex objects like Matplotlib figures.
+    with multiprocessing.Pool(processes=num_threads, maxtasksperchild=1) as pool:
         results = pool.starmap(create_animation_chunk, tasks)
 
     print("\nAll animation chunks have been created:")
@@ -148,7 +320,7 @@ if __name__ == '__main__':
     num_clusters = 5
 
     # USER-DEFINED: SET THE NUMBER OF THREADS/PROCESSES
-    num_threads_to_use = os.cpu_count() or 4
+    num_threads_to_use = os.cpu_count()-2
 
     df = pd.read_parquet('log_returns_by_ticker.parquet')
 
