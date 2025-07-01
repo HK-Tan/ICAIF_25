@@ -20,20 +20,12 @@ os.environ['OMP_NUM_THREADS'] = '1'
 # Higher value = higher CPU usage and higher RAM per worker.
 MICRO_BATCH_SIZE = 10
 
-# --- Setup Paths and Parameters ---
-try:
-    import sys
-    sys.path.append('C:/Users/james/ICAIF_25')
-    from signet.cluster import Cluster
-except (ModuleNotFoundError, ImportError):
-    print("CRITICAL: 'signet' library not found. Please install it.")
-    sys.exit(1)
-
-try:
-    # Set this to the directory containing your data file.
-    os.chdir('C:/Users/james/ICAIF_25/Current_Code/Data')
-except FileNotFoundError:
-    print("Warning: Could not change to the data directory. Ensure paths are correct.")
+os.chdir('..')
+os.chdir('..')
+sys.path.append(os.getcwd())
+from signet.cluster import Cluster
+os.chdir('Current_Code/Data')
+sys.path.append(os.getcwd())
 
 # --- Numba Optimized Functions (Unchanged) ---
 @numba.njit(parallel=True, fastmath=True)

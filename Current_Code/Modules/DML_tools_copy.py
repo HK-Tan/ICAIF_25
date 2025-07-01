@@ -18,48 +18,16 @@ from multiprocessing import Pool
 import time
 from datetime import datetime
 from tqdm import tqdm
-
-try:
-    from statsmodels.stats.multitest import multipletests
-except ImportError:
-    print("statsmodels package not found. Attempting to install...")
-    import subprocess
-    import sys
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "statsmodels"]
-    )
-    # This part of the code should go first since importing parallelized_runs already requires the signet package
-    from statsmodels.stats.multitest import multipletests
-
-## Clustering packages etc
-try:
-    from signet.cluster import Cluster
-except ImportError:
-    print("Signet package not found. Attempting to install from GitHub...")
-    import subprocess
-    import sys
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "git+https://github.com/alan-turing-institute/SigNet.git"]
-    )
-    # This part of the code should go first since importing parallelized_runs already requires the signet package
-    from signet.cluster import Cluster
-
-## EconML packages
-try:
-    from econml.inference import StatsModelsInference
-    from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
-    from econml.dml import LinearDML, SparseLinearDML
-except ImportError:
-    print("econml package not found. Attempting to install...")
-    import subprocess
-    import sys
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "econml"]
-    )
-    # This part of the code should go first since importing parallelized_runs already requires the signet package
-    from econml.inference import StatsModelsInference
-    from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
-    from econml.dml import LinearDML, SparseLinearDML
+from statsmodels.stats.multitest import multipletests
+import os
+import sys
+os.chdir('..')
+os.chdir('..')
+sys.path.append(os.getcwd())
+from signet.cluster import Cluster
+from econml.inference import StatsModelsInference
+from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
+from econml.dml import LinearDML, SparseLinearDML
 
 # from parallelized_runs import calculate_pnl
 
