@@ -457,7 +457,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         last_valid_p = 1
         for p in range(2, p_max + 1):
 
-            ##### Starting value, p = 2 (though this loops till p = 5 unless terminated early)
+            ##### Starting value, p = 2 (though this loops till p = 5/p_max unless terminated early)
 
             """
             Pre Model (Asumming p = 2): 
@@ -636,3 +636,62 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
     }
 
     return result
+
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", contrarian=False):
+    """
+    This function calculates the PnL based on the forecasted returns and actual returns.
+
+    Inputs:
+    forecast_df: DataFrame containing the forecasted returns for each asset/cluster.
+    actual_df: DataFrame containing the actual returns for each asset/cluster (in terms of log returns).
+    pnl_strategy: Strategy for calculating PnL. Options are:
+        - "naive": Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return.
+        - "weighted": Weight based on the predicted return of each cluster.
+        - "top": Only choose clusters with absolute returns above average.
+    contrarian: If True, inverts the trading signals (bets against forecasts).
+
+    Remark:
+    The dataframes keep daily data as rows, with columns as different assets or clusters.
+    We also assume that these df are aligned.
+
+    Output:
+    Returns a Series with total PnL for each asset/cluster over the entire period.
+    """
+
+    # Convert log returns to simple returns for a "factor"
+    # Percentage change is given by exp(log_return) - 1
+    simple_returns = np.exp(actual_df) - 1
+
+    # Set trading direction: -1 for contrarian, 1 for normal
+    direction = -1 if contrarian else 1
+    if pnl_strategy == "naive":
+        raw_positions = direction * np.sign(forecast_df)
+        # Normalize so absolute positions sum to 1 each day
+        row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
+        positions = raw_positions.div(row_abs_sum, axis=0)
+
+    elif pnl_strategy == "weighted":
+        row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
+        positions = direction * forecast_df.div(row_abs_sum, axis=0)
+
+    elif pnl_strategy == "top":
+        positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
+
+        for col in forecast_df.columns:
+            threshold = forecast_df[col].abs().mean()
+            positions.loc[forecast_df[col] > threshold, col] = direction
+            positions.loc[forecast_df[col] < -threshold, col] = -direction
+
+        row_sums = positions.abs().sum(axis=1).replace(0, 1)
+        positions = positions.div(row_sums, axis=0)
+
+    # Calculate daily portfolio returns
+    #print(positions)
+    daily_pnl = positions * simple_returns
+    daily_portfolio_returns_per = daily_pnl.sum(axis=1)
+    print("Daily portfolio returns (percentage change):", daily_portfolio_returns_per)
+    daily_portfolio_returns = daily_portfolio_returns_per + 1
+
+    cumulative_returns = daily_portfolio_returns.cumprod() - 1
+
+    return cumulative_returns, daily_portfolio_returns_per
