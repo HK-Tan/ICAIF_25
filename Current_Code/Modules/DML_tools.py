@@ -637,7 +637,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
 
     return result
 
-def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile="0.5", contrarian=False):
+def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.5, contrarian=False):
     """
     This function calculates the PnL based on the forecasted returns and actual returns.
 
@@ -681,7 +681,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile="0
             abs_val=forecast_df[col].abs()
             sorted=abs_val.sort_values(ascending=False)
             cutoff_number=int(abs_val.shape[0]*(1-percentile))
-            threshold = abs_val[cutoff_number]
+            threshold = sorted[cutoff_number]
             positions.loc[forecast_df[col] > threshold, col] = direction
             positions.loc[forecast_df[col] < -threshold, col] = -direction
 
