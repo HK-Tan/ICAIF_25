@@ -6,6 +6,9 @@ from scipy import sparse
 import numba
 import multiprocessing
 import os
+# Import the tqdm library for progress bars
+from tqdm.auto import tqdm
+
 os.chdir('C:/Users/james/ICAIF_25')
 from signet.cluster import Cluster
 os.chdir('C:/Users/james/ICAIF_25/Current_Code/Data')
@@ -148,8 +151,8 @@ def create_animation_chunk(asset_returns_df,
         chunk_index,
         output_prefix):
     """
-    Worker function to render a single chunk of the animation without a progress bar.
-    Designed to be called by multiprocessing.Pool.
+    Worker function to render a single chunk of the animation.
+    Now includes a frame-by-frame progress bar for its own rendering task.
     """
     asset_returns_np = asset_returns_df.values.astype(np.float32)
     asset_returns_index = asset_returns_df.index
@@ -157,16 +160,13 @@ def create_animation_chunk(asset_returns_df,
 
     # --- Set up the Plot for Animation ---
     fig, ax = plt.subplots(figsize=(10, 8))
-    fig.tight_layout(pad=3.0) # Add padding for the title
+    fig.tight_layout(pad=3.0)
 
-    # Hide axis ticks permanently. No need to do this in the update loop.
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
-    # The animation will run over each possible window in the dataframe
-    num_frames = len(asset_returns_df) - lookback_period
+    initial_frame_index = start_frame
+    initial_window = asset_returns_np[initial_frame_index : initial_frame_index + lookback_period]
 
-    # Logic for Frame 0
-    initial_window = asset_returns_np[0:lookback_period]
     initial_corr = fast_corrcoef_numba(initial_window)
     (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols) = get_sparse_pos_neg_parts(initial_corr)
     pos_corr = sparse.csc_matrix((pos_data, (pos_rows, pos_cols)), shape=initial_corr.shape)
@@ -177,33 +177,24 @@ def create_animation_chunk(asset_returns_df,
     reordered_matrix = reorder_matrix_numba(initial_corr, order_indices)
     initial_matrix_to_plot = set_upper_triangle_nan(reordered_matrix)
 
-    # Create the imshow artist and store it in 'im'
     im = ax.imshow(
         initial_matrix_to_plot,
-        cmap='bwr',
-        vmin=-1,
-        vmax=1,
-        interpolation='none',
-        animated=True # Important for blitting
+        cmap='bwr', vmin=-1, vmax=1,
+        interpolation='none', animated=True
     )
 
-    # Create the title artist and store it in 'title'
-    start_date = asset_returns_index[0].strftime('%Y-%m-%d')
-    end_date = asset_returns_index[lookback_period-1].strftime('%Y-%m-%d')
+    start_date = asset_returns_index[initial_frame_index].strftime('%Y-%m-%d')
+    end_date = asset_returns_index[initial_frame_index + lookback_period - 1].strftime('%Y-%m-%d')
     title = ax.set_title(
         f"Clustered Asset Correlation\n{start_date} to {end_date}",
         fontsize=16
     )
 
     def update(frame_num):
-      # This function is now much leaner. It only calculates new data
-      # and updates the existing artists. NO ax.clear() or ax.imshow()!
-
       start_index = frame_num
       end_index = frame_num + lookback_period
       window_np = asset_returns_np[start_index:end_index]
 
-      # --- Run the core calculation logic for the current frame ---
       correlation_matrix_np = fast_corrcoef_numba(window_np)
       (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols) = get_sparse_pos_neg_parts(correlation_matrix_np)
       pos_corr_numba = sparse.csc_matrix((pos_data, (pos_rows, pos_cols)), shape=correlation_matrix_np.shape)
@@ -216,36 +207,40 @@ def create_animation_chunk(asset_returns_df,
       reordered_matrix_np = reorder_matrix_numba(correlation_matrix_np, order_indices)
       matrix_to_plot = set_upper_triangle_nan(reordered_matrix_np)
 
-      # --- Update the artist data ---
-      im.set_data(matrix_to_plot) # Update the image data
-
+      im.set_data(matrix_to_plot)
       start_date = asset_returns_index[start_index].strftime('%Y-%m-%d')
       end_date = asset_returns_index[end_index-1].strftime('%Y-%m-%d')
-      title.set_text(f"Clustered Asset Correlation\n{start_date} to {end_date}") # Update the title text
+      title.set_text(f"Clustered Asset Correlation\n{start_date} to {end_date}")
 
-      # --- Return a tuple of the modified artists ---
-      # This tells the animation framework which parts of the plot to redraw.
       return im, title
 
-    # --- Create and Return the Animation Object ---
-    ani = FuncAnimation(fig, update, frames=num_frames, blit=True, repeat=False)
-    # --- SAVE WITHOUT PROGRESS BAR ---
+    # --- BUG FIX: Create an iterator for ONLY the frames in this chunk ---
+    frame_iterator = range(start_frame, start_frame + num_frames_in_chunk)
+
+    ani = FuncAnimation(fig, update, frames=frame_iterator, blit=True, repeat=False)
+
+    # --- MODIFICATION: SAVE WITH A TQDM PROGRESS BAR ---
     output_filename = f"{output_prefix}_part_{chunk_index}.mp4"
-    print(f"Starting to render chunk {chunk_index} ({num_frames_in_chunk} frames)...")
 
-    # Save this chunk to a unique file without the progress_callback
-    ani.save(
-        output_filename,
-        writer='ffmpeg',
-        dpi=dpi,
-        fps=15,
-        extra_args=[
-        '-vcodec', 'h264_qsv',
-        '-preset', 'veryfast' # QSV also has presets
-    ]
-    )
+    # This progress bar will show the frame-by-frame rendering progress for this chunk.
+    # `position` and `leave=False` are important for clean, non-overlapping bars in the console.
+    with tqdm(total=num_frames_in_chunk, desc=f"Chunk {chunk_index}", position=chunk_index + 1, leave=False) as pbar:
+        def progress_callback(current_frame, total_frames):
+            """Callback to update the tqdm progress bar for each frame."""
+            pbar.update(1)
 
-    print(f"Finished rendering chunk {chunk_index} -> {output_filename}")
+        # Save this chunk to a unique file, using the progress_callback
+        ani.save(
+            output_filename,
+            writer='ffmpeg',
+            dpi=dpi,
+            fps=15,
+            progress_callback=progress_callback, # This is the key argument
+            extra_args=[
+                '-vcodec', 'h264_qsv',
+                '-preset', 'veryfast'
+            ]
+        )
 
     plt.close(fig)
     return output_filename
@@ -260,7 +255,8 @@ def create_parallel_animations(
     output_prefix: str = "correlation_movie_chunk"
 ):
     """
-    Splits the animation rendering task across multiple processes.
+    Splits the animation rendering task across multiple processes and
+    displays a high-level progress bar tracking the completion of chunks.
     """
     total_frames = len(asset_returns_df) - lookback_period
     if total_frames <= 0:
@@ -273,6 +269,7 @@ def create_parallel_animations(
     current_start_frame = 0
     for i in range(num_threads):
         start = current_start_frame
+        # Ensure the last chunk includes any remaining frames
         if i == num_threads - 1:
             end = total_frames
         else:
@@ -289,11 +286,18 @@ def create_parallel_animations(
     print(f"Total frames: {total_frames}. Splitting into {len(tasks)} chunks to be processed by {num_threads} threads.")
     print("Starting parallel rendering. This may take a while...")
 
-    # --- RUN TASKS WITHOUT PROGRESS BAR ---
+    # --- MODIFICATION: RUN TASKS WITH A HIGH-LEVEL PROGRESS BAR ---
+    # We need a helper function because pool.imap_unordered doesn't support starmap-like argument unpacking.
+    def worker_wrapper(args):
+        return create_animation_chunk(*args)
+
     # Use maxtasksperchild=1 to force a worker process to restart after each task.
-    # This is highly effective at releasing memory from complex objects like Matplotlib figures.
+    # This is highly effective at releasing memory from Matplotlib figures.
     with multiprocessing.Pool(processes=num_threads, maxtasksperchild=1) as pool:
-        results = pool.starmap(create_animation_chunk, tasks)
+        # pool.imap_unordered applies the worker to each task and yields results as they complete.
+        # We wrap this iterator with tqdm to create a progress bar that tracks the completion of chunks.
+        results_iterator = pool.imap_unordered(worker_wrapper, tasks)
+        results = list(tqdm(results_iterator, total=len(tasks), desc="Overall Progress", position=0))
 
     print("\nAll animation chunks have been created:")
     for filename in results:
@@ -301,8 +305,9 @@ def create_parallel_animations(
 
     # --- Create file_list.txt for easy ffmpeg concatenation ---
     file_list_path = "file_list.txt"
+    # Sort results to ensure the chunks are listed in the correct order for stitching
     with open(file_list_path, "w") as f:
-        for filename in sorted(results): # Sort to ensure correct order
+        for filename in sorted(results):
             f.write(f"file '{filename}'\n")
 
     print(f"\nGenerated '{file_list_path}' for video stitching.")
@@ -320,11 +325,12 @@ if __name__ == '__main__':
     num_clusters = 5
 
     # USER-DEFINED: SET THE NUMBER OF THREADS/PROCESSES
-    num_threads_to_use = os.cpu_count()-2
+    # Using os.cpu_count() is a good default
+    num_threads_to_use = max(1, os.cpu_count() - 2)
 
     df = pd.read_parquet('log_returns_by_ticker.parquet')
 
-    # 2. Run the parallel animation creation process
+    # Run the parallel animation creation process
     create_parallel_animations(
         asset_returns_df=df,
         lookback_period=lookback,
