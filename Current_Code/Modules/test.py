@@ -1,4 +1,5 @@
 import pandas as pd
+import pandas as pd
 import numpy as np
 import multiprocessing
 import os
@@ -123,13 +124,9 @@ def process_and_stream_chunk(
             batch_idx += 1
             if batch_idx == micro_batch_size:
                 f_out.write(matrix_batch_preallocated.tobytes())
-                f_out.flush()
-                os.fsync(f_out.fileno())
                 batch_idx = 0
         if batch_idx > 0:
             f_out.write(matrix_batch_preallocated[:batch_idx].tobytes())
-            f_out.flush()
-            os.fsync(f_out.fileno())
 
 # --- PARALLEL GENERATION (Unchanged) ---
 def parallel_generate_matrices(
@@ -279,50 +276,55 @@ def render_video_from_streamed_chunks(
     plt.close(fig)
     print("\nVideo created successfully.")
 
-# --- Main Execution Block ---
+# --- Main Execution Block (MODIFIED FOR A QUICK TEST) ---
 if __name__ == '__main__':
     multiprocessing.freeze_support()
 
-    # --- Parameters for a FULL run ---
-    lookback = 252
-    num_threads_to_use = os.cpu_count() - 2
-    cluster_values_to_run = [3, 5, 8, 10]
+    # --- Parameters for a QUICK test run ---
+    # 1. Use a short lookback period to reduce work per frame.
+    lookback = 30
+    # 2. Use fewer threads if you want to see clearer log output for debugging.
+    num_threads_to_use = os.cpu_count() - 1
+    # 3. Only run for ONE cluster value to avoid repeating the whole process.
+    cluster_values_to_run = [3]
 
-    # --- Parameters for a QUICK test run (uncomment to use) ---
-    # lookback = 30
-    # num_threads_to_use = 2
-    # cluster_values_to_run = [3]
-
+    print(f"--- RUNNING IN QUICK TEST MODE ---")
     print(f"Using {num_threads_to_use} threads for parallel processing.")
     print("Loading data...")
     df_full = pd.read_parquet('log_returns_by_ticker.parquet')
 
-    # --- To use a slice for testing, uncomment these lines ---
-    # df = df_full.iloc[:200, :50]
-    # print(f"Data SLICED to: {df.shape[0]} rows, {df.shape[1]} assets for the test.")
+    # --- CRITICAL CHANGE: Slice the DataFrame to a very small size ---
+    # This reduces BOTH the number of frames and the complexity of each matrix.
+    # We take 100 rows and 20 columns.
+    # This will generate 100 - 30 = 70 frames.
+    df = df_full.iloc[:100, :20]
+    # -------------------------------------------------------------------
 
-    # Use the full dataframe by default
-    df = df_full
-    print(f"Data loaded: {df.shape[0]} rows, {df.shape[1]} assets.")
+    print(f"Data loaded and SLICED to: {df.shape[0]} rows, {df.shape[1]} assets for the test.")
 
     for num_clusters in cluster_values_to_run:
-        print(f"\n{'='*30}\n  STARTING RUN FOR {num_clusters} CLUSTERS  \n{'='*30}\n")
-        matrix_output_dir = f"temp_matrices_{num_clusters}clusters"
+        print(f"\n{'='*30}\n  STARTING TEST RUN FOR {num_clusters} CLUSTERS  \n{'='*30}\n")
+        matrix_output_dir = f"temp_matrices_TEST_{num_clusters}clusters"
 
         temp_dir = parallel_generate_matrices(
             asset_returns_df=df, lookback_period=lookback, n_clusters_to_form=num_clusters,
             num_threads=num_threads_to_use, output_dir=matrix_output_dir)
 
-        final_movie_name = f"final_correlation_movie_{num_clusters}clusters.mp4"
-        render_video_from_streamed_chunks(
+        if not temp_dir:
+            print("Matrix generation failed. Skipping run.")
+            continue
+
+        final_movie_name = f"final_correlation_movie_TEST_{num_clusters}clusters.mp4"
+        success = render_video_from_streamed_chunks(
             matrix_dir=temp_dir,
             output_filename=final_movie_name,
             n_clusters=num_clusters,
-            render_ram_budget_gb=4.0  # Set the rendering RAM budget here. 4GB is a safe default.
+            render_ram_budget_gb=15.0  # Set the rendering RAM budget here. 4GB is a safe default.
         )
 
-        print(f"Cleaning up temporary matrix chunks in {temp_dir}...")
-        shutil.rmtree(temp_dir)
-        print("Cleanup complete.")
+        if success:
+            print(f"Cleaning up temporary matrix chunks in {temp_dir}...")
+            shutil.rmtree(temp_dir)
+            print("Cleanup complete.")
 
-    print(f"\n{'='*30}\n  ALL RUNS COMPLETED  \n{'='*30}\n")
+    print(f"\n{'='*30}\n  QUICK TEST RUN COMPLETED  \n{'='*30}\n")
