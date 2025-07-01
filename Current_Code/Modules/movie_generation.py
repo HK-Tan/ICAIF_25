@@ -9,13 +9,6 @@ import os
 from tqdm.auto import tqdm
 
 # --- Setup Paths and Parameters ---
-# It's good practice to set these paths at the top
-# and handle directory changes carefully.
-# Let's assume the data is in a subfolder relative to the script.
-# SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) # Gets the directory of the script
-# DATA_DIR = os.path.join(SCRIPT_DIR, '..', 'Data')
-# os.chdir(DATA_DIR)
-# For now, we'll keep your original setup.
 os.chdir('C:/Users/james/ICAIF_25')
 from signet.cluster import Cluster
 os.chdir('C:/Users/james/ICAIF_25/Current_Code/Data')
@@ -168,7 +161,9 @@ def create_animation_chunk(asset_returns_df,
     ani = FuncAnimation(fig, update, frames=frame_iterator, blit=True, repeat=False)
     output_filename = f"{output_prefix}_part_{chunk_index}.mp4"
 
-    with tqdm(total=num_frames_in_chunk, desc=f"Chunk {chunk_index}", position=chunk_index + 1, leave=False) as pbar:
+    # The position argument is set to the chunk_index. This makes each
+    # worker's progress bar appear on its own line in the terminal.
+    with tqdm(total=num_frames_in_chunk, desc=f"Rendering Chunk {chunk_index}", position=chunk_index, leave=False) as pbar:
         def progress_callback(current_frame, total_frames):
             pbar.update(1)
         ani.save(
@@ -179,15 +174,6 @@ def create_animation_chunk(asset_returns_df,
     plt.close(fig)
     return output_filename
 
-# *** FIX: MOVED THIS FUNCTION TO THE TOP LEVEL ***
-def worker_wrapper(args):
-    """
-    A simple top-level wrapper that unpacks arguments for use with
-    pool.imap_unordered, which requires a single-argument function.
-    This function must be at the top level to be "picklable".
-    """
-    return create_animation_chunk(*args)
-
 # --- ORCHESTRATOR FUNCTION ---
 def create_parallel_animations(
     asset_returns_df: pd.DataFrame,
@@ -197,8 +183,8 @@ def create_parallel_animations(
     output_prefix: str = "correlation_movie_chunk"
 ):
     """
-    Splits the animation rendering task across multiple processes and
-    displays a high-level progress bar tracking the completion of chunks.
+    Splits the animation rendering task across multiple processes.
+    Each process will display its own progress bar.
     """
     total_frames = len(asset_returns_df) - lookback_period
     if total_frames <= 0:
@@ -216,18 +202,37 @@ def create_parallel_animations(
             end = start + frames_per_thread
         num_frames_in_chunk = end - start
         if num_frames_in_chunk > 0:
-            task_args = (asset_returns_df, lookback_period, n_clusters_to_form, start, num_frames_in_chunk, i, output_prefix)
+            # 2. Determine the slice of the input DataFrame needed for this chunk.
+            # The start of the data slice corresponds to the start of the first frame's lookback window.
+            df_slice_start = start
+
+            # The end of the data slice must include the full lookback window for the *last* frame in the chunk.
+            # Last frame index is (end_frame - 1). Its data window is from index (end_frame - 1) to (end_frame - 1 + lookback_period).
+            # So, the slice must go up to (end_frame + lookback_period).
+            df_slice_end = end + lookback_period
+
+            # Create the self-contained DataFrame slice for this task.
+            chunk_df = asset_returns_df.iloc[df_slice_start:df_slice_end].copy()
+
+            # 3. Define the arguments for the worker function.
+            # We pass the smaller chunk_df, not the whole asset_returns_df.
+            # The worker will generate `num_frames_in_chunk` frames.
+            # `start_frame` is passed so the worker knows the global frame number for saving files.
+            task_args = (chunk_df, lookback_period, n_clusters_to_form, start, num_frames_in_chunk, i, output_prefix)
             tasks.append(task_args)
         current_start_frame = end
 
     print(f"Total frames: {total_frames}. Splitting into {len(tasks)} chunks to be processed by {num_threads} threads.")
-    print("Starting parallel rendering. This may take a while...")
+    print("Starting parallel rendering...")
 
+    # --- MODIFICATION: REMOVED OVERALL PROGRESS BAR ---
+    # We now use pool.starmap, which is simpler and directly takes the list of task arguments.
+    # It will block until all parallel tasks are complete, and we will see the
+    # individual progress bars from each worker process in the console.
     with multiprocessing.Pool(processes=num_threads, maxtasksperchild=1) as pool:
-        # Use the top-level worker_wrapper, which is now picklable.
-        results_iterator = pool.imap_unordered(worker_wrapper, tasks)
-        results = list(tqdm(results_iterator, total=len(tasks), desc="Overall Progress", position=0))
+        results = pool.starmap(create_animation_chunk, tasks)
 
+    # Add a newline to prevent the final "print" from appearing on the same line as the last progress bar.
     print("\nAll animation chunks have been created:")
     for filename in results:
         print(f"- {filename}")
