@@ -25,6 +25,7 @@ import matplotlib.dates as mdates
 from multiprocessing import Pool
 import time
 from datetime import datetime
+import gc
 
 # from parallelized_runs import calculate_pnl
 
@@ -113,7 +114,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                                         days_valid=20,  # 1 month validation set
                                         error_metric='rmse'):
     """
-    THe purpose of this function is to run a rolling window evaluation
+    The purpose of this function is to run a rolling window evaluation
     using OR-VAR. The idea is that we will always run this via orthongalized regression
     framework under DML. However, to determine the optimal value of p, we will run a
     "hyperparameter"-like search over the lookback window (to prevent look-ahead bias).
@@ -199,7 +200,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
                 # Create lagged treatment variables
                 # Recall that columns are days, and rows are tickers
-                Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1009 but 1009 excluded
+                Y_df_lagged = asset_df.iloc[start_idx:end_idx,:] # 0:989 but 989 is excluded, 19:1009 but 1009 excluded
                 W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
                 T_df_lagged = make_lags(Y_df_lagged, p)
                 Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
@@ -239,6 +240,10 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
                         current_error += root_mean_squared_error(Y_df_pred, Y_hat_next)
                 else:
                     raise ValueError("Unsupported error metric.")
+                
+                # Memory optimization: cleanup model
+                del est
+                gc.collect()
             valid_errors.append( (p,current_error) )
         print("Validation errors for different p values:", valid_errors)
         p_opt = min(valid_errors, key=lambda x: x[1])[0]  # Get the p with the minimum validation error
@@ -251,7 +256,7 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         # Max value of day_idx is num_days - 1, ie 1298, so we are allowed to get up 
         #   to day_idx + 2 = 1300 (exclusive)
 
-        Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx,:].copy()  # Include current day for prediction
+        Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx,:]  # Include current day for prediction
         W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx,:], p_opt)
         T_df_lagged = make_lags(Y_df_lagged, p_opt)
         Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
@@ -290,6 +295,10 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         # ... last = 1298 - 1008 = 290th  row -> day_idx = 1298
         # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
         #   so this is consistent!
+        
+        # Memory optimization: cleanup model
+        del est
+        gc.collect()
     result = {
         'test_start': test_start, 
         'num_days': num_days,
@@ -431,7 +440,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         final_end_idx = train_end + 1                      # e.g. 1010
 
         # Outcome; same for both pre and post models
-        Y_df_lagged = asset_df.iloc[train_start:final_end_idx,:].copy()  
+        Y_df_lagged = asset_df.iloc[train_start:final_end_idx,:]  
             # Exclusive of the last day, so 0:1009 (1009 is excluded) for training
             # This makes sense since "today" is day index of 1008, and we already know the value of the asset
             #   and hence, are allowed to train on it.
@@ -442,7 +451,7 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         W_df_lagged = make_lags(confound_df.iloc[train_start:final_end_idx,:], 1)
 
         ### Initializing the pre model outside of the loop (before p = 2)
-        T_df_pre_lagged = make_lags(asset_df.iloc[train_start:final_end_idx,:].copy(), 1)
+        T_df_pre_lagged = make_lags(asset_df.iloc[train_start:final_end_idx,:], 1)
         Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_lagged)
 
         """
@@ -471,22 +480,22 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
             Control/Confounding = confound_lag1, confound_lag2
             """
 
-            W_df_pre_lagged = pd.concat([
-                W_df_pre_lagged,
-                confound_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}')
-            ], axis=1)
+            # Collect parts first, then concatenate once
+            confound_parts = [W_df_pre_lagged]
+            confound_parts.append(confound_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}'))
+            W_df_pre_lagged = pd.concat(confound_parts, axis=1)
         
             # Confounding variables for post model are the same as pre-model initially
-            W_df_post_lagged = W_df_pre_lagged.copy()
+            W_df_post_lagged = W_df_pre_lagged
 
             # Note that T_df_pre_lagged is already created at the end of the hypothesis testing loops
             #   and was designed to be carried over to the next iteration here.
 
             # Create post-model treatment variables (pre + current lag p)
-            T_df_post_lagged = pd.concat([
-                T_df_pre_lagged,
-                asset_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}')
-            ], axis=1)
+            # Collect parts first, then concatenate once
+            treatment_parts = [T_df_pre_lagged]
+            treatment_parts.append(asset_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}'))
+            T_df_post_lagged = pd.concat(treatment_parts, axis=1)
 
             # Realign models
             Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_pre_lagged)
@@ -509,6 +518,10 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
             est_pre_inf = est_pre.const_marginal_ate_inference()
             theta_pre = est_pre_inf.mean_point.ravel()  # Flatten to 1-D vector
             cov_pre = est_pre_inf.mean_pred_stderr.ravel()
+            
+            # Memory optimization: cleanup pre-model
+            del est_pre
+            gc.collect()
 
             ### Post Model
             est_post = LinearDML(
@@ -524,6 +537,10 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
             est_post_inf = est_post.const_marginal_ate_inference()
             theta_post = est_post_inf.mean_point.ravel()  # Flatten to 1-D vector
             cov_post = est_post_inf.mean_pred_stderr.ravel()
+            
+            # Memory optimization: cleanup post-model
+            del est_post
+            gc.collect()
             
             T_names_pre = T_df_pre_lagged.columns.tolist()
             T_names_post = T_df_post_lagged.columns.tolist()
@@ -626,6 +643,11 @@ def rolling_window_ORACLE_VAR(asset_df, confound_df,
         # ... last = 1298 - 1008 = 290th  row -> day_idx = 1298
         # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
         #   so this is consistent!
+        
+        # Memory optimization: cleanup final model
+        del est
+        gc.collect()
+        
     result = {
         'test_start': test_start,
         'num_days': num_days,
