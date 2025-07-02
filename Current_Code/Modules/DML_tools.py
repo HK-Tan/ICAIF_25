@@ -647,7 +647,8 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.
     pnl_strategy: Strategy for calculating PnL. Options are:
         - "naive": Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return.
         - "weighted": Weight based on the predicted return of each cluster.
-        - "top": Only choose clusters with absolute returns above average.
+        - "top": Only choose clusters with absolute returns above a certain percentile.
+    percentile: If pnl_strategy is "top", this is the percentile threshold for selecting clusters.
     contrarian: If True, inverts the trading signals (bets against forecasts).
 
     Remark:
@@ -655,7 +656,9 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.
     We also assume that these df are aligned.
 
     Output:
-    Returns a Series with total PnL for each asset/cluster over the entire period.
+    tuple of (pd.Series, pd.Series)
+        - cumulative_returns: Cumulative portfolio returns starting from 0
+        - daily_portfolio_returns_per: Daily percentage returns
     """
 
     # Convert log returns to simple returns for a "factor"
