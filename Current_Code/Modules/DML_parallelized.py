@@ -31,7 +31,7 @@ from datetime import datetime
 # Helper function to make lagged copies of a DataFrame
 def make_lags(df, p):
     """
-    Create lagged copies of a DataFrame (withtout the original columns; ie starting from lag 1).
+    Create lagged copies of a DataFrame (without the original columns; ie starting from lag 1).
 
     Parameters:
     df (pd.DataFrame): The input DataFrame.
@@ -40,7 +40,7 @@ def make_lags(df, p):
     Returns:
     pd.DataFrame: A DataFrame with lagged columns.
     """
-    if not isinstance(p, int): raise ValueError(f"Value of p for computing lags must be an integer, acutal value is p={p}")
+    if not isinstance(p, int): raise ValueError(f"Value of p for computing lags must be an integer, actual value is p={p}")
     return pd.concat([df.shift(k).add_suffix(f'_lag{k}') for k in range(1, p+1)], axis=1)
 
 def make_lags_with_orginal(df, p):
@@ -101,67 +101,6 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
     else:
         return base_model
 
-def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.5, contrarian=False):
-    """
-    This function calculates the PnL based on the forecasted returns and actual returns.
-
-    Inputs:
-    forecast_df: DataFrame containing the forecasted returns for each asset/cluster.
-    actual_df: DataFrame containing the actual returns for each asset/cluster (in terms of log returns).
-    pnl_strategy: Strategy for calculating PnL. Options are:
-        - "naive": Go long $1 on clusters with positive forecast return, go short $1 on clusters with negative forecast return.
-        - "weighted": Weight based on the predicted return of each cluster.
-        - "top": Only choose clusters with absolute returns above average.
-    contrarian: If True, inverts the trading signals (bets against forecasts).
-
-    Remark:
-    The dataframes keep daily data as rows, with columns as different assets or clusters.
-    We also assume that these df are aligned.
-
-    Output:
-    Returns a Series with total PnL for each asset/cluster over the entire period.
-    """
-
-    # Convert log returns to simple returns for a "factor"
-    # Percentage change is given by exp(log_return) - 1
-    simple_returns = np.exp(actual_df) - 1
-
-    # Set trading direction: -1 for contrarian, 1 for normal
-    direction = -1 if contrarian else 1
-    if pnl_strategy == "naive":
-        raw_positions = direction * np.sign(forecast_df)
-        # Normalize so absolute positions sum to 1 each day
-        row_abs_sum = raw_positions.abs().sum(axis=1).replace(0, 1)
-        positions = raw_positions.div(row_abs_sum, axis=0)
-
-    elif pnl_strategy == "weighted":
-        row_abs_sum = forecast_df.abs().sum(axis=1).replace(0, 1)
-        positions = direction * forecast_df.div(row_abs_sum, axis=0)
-
-    elif pnl_strategy == "top":
-        positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
-
-        for col in forecast_df.columns:
-            abs_val=forecast_df[col].abs()
-            sorted=abs_val.sort_values(ascending=False)
-            cutoff_number=int(abs_val.shape[0]*(1-percentile))
-            threshold = sorted[cutoff_number]
-            positions.loc[forecast_df[col] > threshold, col] = direction
-            positions.loc[forecast_df[col] < -threshold, col] = -direction
-
-        row_sums = positions.abs().sum(axis=1).replace(0, 1)
-        positions = positions.div(row_sums, axis=0)
-
-    # Calculate daily portfolio returns
-    #print(positions)
-    daily_pnl = positions * simple_returns
-    daily_portfolio_returns_per = daily_pnl.sum(axis=1)
-    print("Daily portfolio returns (percentage change):", daily_portfolio_returns_per)
-    daily_portfolio_returns = daily_portfolio_returns_per + 1
-
-    cumulative_returns = daily_portfolio_returns.cumprod() - 1
-
-    return cumulative_returns, daily_portfolio_returns_per
 
 ###################### OR-VAR ##################################################################
 
@@ -343,12 +282,12 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     # IZ: Now we test the optimal found p's on the test sets, this can be parallelized over the day indices as well
     print("Computing daily predictions using the observed optimal VAR order")
     with Pool(max_threads) as pool:
-        Y_hat_next_store = pool.starmap(
+        Y_hat_next_store = np.array(pool.starmap(
             evaluate_prediction,
             [(day_idx, asset_df, confound_df, lookback_days, p_optimal[day_idx-test_start],
             model_y_name, model_y_params, model_t_name, model_t_params, cv_folds)
             for day_idx in range(test_start, num_days)]
-    )
+        ))
 
     result = {
         'test_start': test_start,
@@ -544,7 +483,7 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
 
         # Case 1: Significance of new coefficients
         if p_sig < significance_level:
-            print(f"✓ Significance detected for lag {p} (p-value: {p_sig:.4f})")
+            # print(f"✓ Significance detected for lag {p} (p-value: {p_sig:.4f})")
             which_lag_treatment[:, p] = 1  # Mark this lag as treatment
             T_df_pre_lagged = T_df_post_lagged
             # Y_df_pre_lagged = Y_df_post_lagged  (true but not necessary)
@@ -554,7 +493,7 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
 
         # Case 2: Drift without Significance
         elif p_drift < significance_level:
-            print(f"✓ Drift detected for lag {p} (p-value: {p_drift:.4f})")
+            # print(f"✓ Drift detected for lag {p} (p-value: {p_drift:.4f})")
             which_lag_control[:, p] = 1  # Mark this lag as control/confounding
             # Shift the treatment variable to the confounding
             # First, create that asset_lagged variable with just lag p assets
@@ -570,7 +509,7 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
 
         # Case 3: Neither
         else:   
-            print(f"✗ No significance or drift for lag {p} (p_sig: {p_sig:.4f}, p_drift: {p_drift:.4f})")
+            # print(f"✗ No significance or drift for lag {p} (p_sig: {p_sig:.4f}, p_drift: {p_drift:.4f})")
             last_valid_p = p - 1  # Store the optimal p for this day (this p didn't pass so p - 1))
             break
     
