@@ -701,14 +701,15 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.
 
     elif pnl_strategy == "top":
         positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
+        iter=forecast_df.shape[0]
 
-        for col in forecast_df.columns:
-            abs_val=forecast_df[col].abs()
+        for i in iter:
+            abs_val=forecast_df.iloc[i,:].abs()
             sorted=abs_val.sort_values(ascending=False)
             cutoff_number=int(abs_val.shape[0]*(1-percentile))
             threshold = sorted[cutoff_number]
-            positions.loc[forecast_df[col] > threshold, col] = direction
-            positions.loc[forecast_df[col] < -threshold, col] = -direction
+            positions.iloc[i,forecast_df.iloc[i,:] > threshold] = direction
+            positions.iloc[i,forecast_df.iloc[i,:]< -threshold] = -direction
 
         row_sums = positions.abs().sum(axis=1).replace(0, 1)
         positions = positions.div(row_sums, axis=0)
