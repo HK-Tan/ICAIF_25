@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import shutil
 import pickle
+import sys  # Added missing import
 import numba
 from scipy import sparse
 import matplotlib
@@ -15,17 +16,20 @@ import matplotlib.animation as animation
 # This must be set BEFORE any library that uses MKL (like numpy or sklearn).
 os.environ['OMP_NUM_THREADS'] = '1'
 
+plt.rcParams['animation.ffmpeg_path'] = r"C:\users\james\miniconda3\envs\285J\Library\bin\ffmpeg.exe"
+
 # --- CONFIGURATION PARAMETER ---
 # This controls the trade-off between RAM usage and CPU utilization.
 # Higher value = higher CPU usage and higher RAM per worker.
 MICRO_BATCH_SIZE = 10
 
-os.chdir('..')
-os.chdir('..')
+# --- Correct Pathing ---
+# Assuming the script is run from 'Current_Code/Data'
+# and the signet library is in the grandparent directory.
+os.chdir(os.path.join('..', '..'))
 sys.path.append(os.getcwd())
 from signet.cluster import Cluster
-os.chdir('Current_Code/Data')
-sys.path.append(os.getcwd())
+os.chdir(os.path.join('Current_Code', 'Data'))
 
 # --- Numba Optimized Functions (Unchanged) ---
 @numba.njit(parallel=True, fastmath=True)
@@ -88,17 +92,31 @@ def get_sparse_pos_neg_parts(matrix):
                 neg_idx += 1
     return (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols)
 
-# --- WORKER FUNCTION (Unchanged) ---
+# --- MODIFIED WORKER FUNCTION ---
 def process_and_stream_chunk(
     asset_returns_chunk_np, lookback_period, n_clusters_to_form,
-    num_frames_in_chunk, chunk_index, output_dir, micro_batch_size):
+    num_daily_frames_in_chunk, chunk_index, output_dir, micro_batch_size,
+    global_start_frame, step_size):
+    """
+    Worker process that calculates clustered matrices but only for days
+    that fall on the specified step_size interval.
+    """
     chunk_filename = os.path.join(output_dir, f"chunk_{chunk_index:03d}.bin")
     asset_dim = asset_returns_chunk_np.shape[1]
     matrix_batch_preallocated = np.empty(
         (micro_batch_size, asset_dim, asset_dim), dtype=np.float32)
     batch_idx = 0
     with open(chunk_filename, 'wb') as f_out:
-        for i in range(num_frames_in_chunk):
+        # Iterate over all possible daily frames in this worker's assigned data chunk
+        for i in range(num_daily_frames_in_chunk):
+            current_global_daily_frame = global_start_frame + i
+
+            # --- CORE CHANGE: Skip days that are not on the weekly interval ---
+            if current_global_daily_frame % step_size != 0:
+                continue
+
+            # If we are here, it's a day we need to process
+            print(f"Worker {chunk_index}: Processing weekly frame derived from daily index {current_global_daily_frame}")
             window_np = asset_returns_chunk_np[i : i + lookback_period]
             correlation_matrix_np = fast_corrcoef_numba(window_np)
             (pos_data, pos_rows, pos_cols), (neg_data, neg_rows, neg_cols) = get_sparse_pos_neg_parts(correlation_matrix_np)
@@ -123,149 +141,122 @@ def process_and_stream_chunk(
             f_out.flush()
             os.fsync(f_out.fileno())
 
-# --- PARALLEL GENERATION (Unchanged) ---
+# --- MODIFIED PARALLEL GENERATION ---
 def parallel_generate_matrices(
     asset_returns_df: pd.DataFrame, lookback_period: int, n_clusters_to_form: int,
-    num_threads: int, output_dir: str):
-    total_frames = len(asset_returns_df) - lookback_period
+    step_size: int, num_threads: int, output_dir: str):
+    """
+    Manages the parallel generation of matrices, creating metadata and tasks
+    that account for the weekly (step_size) processing interval.
+    """
+    # The maximum number of frames if we were processing daily
+    max_daily_frames = len(asset_returns_df) - lookback_period
+    if max_daily_frames < 0: max_daily_frames = 0
+
+    # The list of global daily start indices we actually want to process
+    indices_to_process = list(range(0, max_daily_frames, step_size))
+    total_weekly_frames = len(indices_to_process)
+
     if os.path.exists(output_dir): shutil.rmtree(output_dir)
     os.makedirs(output_dir)
     print(f"Created temp directory for matrix chunks: {output_dir}")
     all_returns_np = asset_returns_df.values.astype(np.float32)
     original_index = asset_returns_df.index
     asset_dim = asset_returns_df.shape[1]
+
+    # Metadata must reflect the *weekly* frames we are generating
     metadata = {
-        'total_frames': total_frames, 'asset_dim': asset_dim, 'dtype': 'float32',
+        'total_frames': total_weekly_frames, # The correct, smaller number
+        'asset_dim': asset_dim, 'dtype': 'float32',
         'date_strings': [
+            # Iterate over the sparse list of indices to get the correct dates
             f"{original_index[i].strftime('%Y-%m-%d')} to {original_index[i + lookback_period - 1].strftime('%Y-%m-%d')}"
-            for i in range(total_frames)
+            for i in indices_to_process
         ]
     }
     with open(os.path.join(output_dir, 'metadata.pkl'), 'wb') as f: pickle.dump(metadata, f)
-    frames_per_thread = (total_frames + num_threads - 1) // num_threads
+
+    # Distribute the daily frame ranges to threads. The threads themselves will skip frames.
+    daily_frames_per_thread = (max_daily_frames + num_threads - 1) // num_threads
     tasks = []
     for i in range(num_threads):
-        start_frame_global = i * frames_per_thread
-        end_frame_global = min(start_frame_global + frames_per_thread, total_frames)
-        num_frames_in_chunk = end_frame_global - start_frame_global
-        if num_frames_in_chunk > 0:
+        start_frame_global = i * daily_frames_per_thread
+        if start_frame_global >= max_daily_frames: continue
+
+        end_frame_global = min(start_frame_global + daily_frames_per_thread, max_daily_frames)
+        num_daily_frames_in_chunk = end_frame_global - start_frame_global
+
+        if num_daily_frames_in_chunk > 0:
             slice_start = start_frame_global
             slice_end = end_frame_global + lookback_period - 1
             chunk_np = all_returns_np[slice_start:slice_end]
-            task_args = (chunk_np, lookback_period, n_clusters_to_form,
-                         num_frames_in_chunk, i, output_dir, MICRO_BATCH_SIZE)
+            task_args = (
+                chunk_np, lookback_period, n_clusters_to_form,
+                num_daily_frames_in_chunk, i, output_dir, MICRO_BATCH_SIZE,
+                # New args for the worker:
+                start_frame_global,
+                step_size
+            )
             tasks.append(task_args)
-    print(f"\nGenerating {total_frames} matrices across {len(tasks)} chunks...")
+
+    print(f"\nGenerating {total_weekly_frames} weekly matrices across {len(tasks)} worker chunks...")
     with multiprocessing.Pool(processes=num_threads) as pool:
         pool.starmap(process_and_stream_chunk, tasks)
     print("\nAll matrix chunks generated successfully.")
     return output_dir
 
-# --- NEW: RENDERING FUNCTION WITH MINI-CHUNK CACHING ---
+# --- RENDERING FUNCTION (Unchanged) ---
 def render_video_from_streamed_chunks(
-    matrix_dir: str,
-    output_filename: str,
-    n_clusters: int,
-    render_ram_budget_gb: float = 4.0
-):
-    """
-    Renders the video by reading matrices in small, fixed-size "mini-chunks"
-    from the large .bin files on disk. This keeps RAM usage low and predictable.
-    """
+    matrix_dir: str, output_filename: str, n_clusters: int,
+    render_ram_budget_gb: float = 4.0):
     with open(os.path.join(matrix_dir, 'metadata.pkl'), 'rb') as f:
         metadata = pickle.load(f)
-
-    total_frames = metadata['total_frames']
-    asset_dim = metadata['asset_dim']
-    dtype = np.dtype(metadata['dtype'])
-    date_strings = metadata['date_strings']
-
+    total_frames = metadata['total_frames']; asset_dim = metadata['asset_dim']
+    dtype = np.dtype(metadata['dtype']); date_strings = metadata['date_strings']
     chunk_files = sorted([os.path.join(matrix_dir, f) for f in os.listdir(matrix_dir) if f.endswith('.bin')])
-
     if not chunk_files:
-        print("Error: No matrix chunk files (.bin) found in the directory.")
-        return
-
-    # --- Memory-Efficient "Mini-Chunk" Caching Logic ---
+        print("Error: No matrix chunk files (.bin) found in the directory."); return
     matrix_size_bytes = asset_dim * asset_dim * dtype.itemsize
     ram_budget_bytes = render_ram_budget_gb * 1024**3
-
-    # Calculate how many full matrices we can fit in our RAM budget
     matrix_cache_size_frames = max(1, int(ram_budget_bytes // matrix_size_bytes))
-
     chunk_frame_counts = [os.path.getsize(f) // matrix_size_bytes for f in chunk_files]
     chunk_start_frames = np.cumsum([0] + chunk_frame_counts[:-1]).astype(np.int64)
-
     print(f"\nPreparing to render {total_frames} frames from {len(chunk_files)} large chunk files.")
     print(f"Rendering RAM budget set to {render_ram_budget_gb} GB.")
     print(f"Reading data in mini-chunks of {matrix_cache_size_frames} matrices (~{matrix_cache_size_frames * matrix_size_bytes / 1024**2:.2f} MB each).")
-
-    # --- Animation Setup ---
     fig, ax = plt.subplots(figsize=(10, 8.8), dpi=64)
     fig.subplots_adjust(top=0.9, bottom=0.05, left=0.05, right=0.95)
     fig.patch.set_facecolor('#F0F0F0'); ax.set_facecolor('#F0F0F0')
-
-    # --- Caching variables for the update function ---
-    # We use a mutable dict to hold state across calls to the update function.
-    cache = {
-        'data': None,          # Will hold the numpy array of the current mini-chunk
-        'start_frame': -1,     # Global start frame of the cached data
-        'end_frame': -1        # Global end frame (exclusive) of the cached data
-    }
-
-    # Function to load a new mini-chunk into the cache
+    cache = {'data': None, 'start_frame': -1, 'end_frame': -1}
     def load_minicache(global_frame_to_load):
-        # Find which large .bin file the frame belongs to
         target_chunk_idx = np.searchsorted(chunk_start_frames, global_frame_to_load, side='right') - 1
-
-        # Calculate where to start reading within that large file
         local_start_frame = global_frame_to_load - chunk_start_frames[target_chunk_idx]
-
         filepath = chunk_files[target_chunk_idx]
-
         print(f"  CACHE MISS: Loading mini-chunk starting at frame {global_frame_to_load} from file {os.path.basename(filepath)}...")
-
         with open(filepath, 'rb') as f:
-            # Seek to the exact byte location of the desired matrix
             byte_offset = local_start_frame * matrix_size_bytes
             f.seek(byte_offset)
-
-            # Read exactly one mini-chunk's worth of data (or less if at EOF)
             elements_to_read = matrix_cache_size_frames * asset_dim * asset_dim
             raw_data = np.fromfile(f, dtype=dtype, count=elements_to_read)
-
-        # Update cache content and its global frame range
         num_frames_read = len(raw_data) // (asset_dim * asset_dim)
         cache['data'] = raw_data.reshape((num_frames_read, asset_dim, asset_dim))
         cache['start_frame'] = global_frame_to_load
         cache['end_frame'] = global_frame_to_load + num_frames_read
-
-    # Initialize by loading the first mini-chunk
     load_minicache(0)
-
     im = ax.imshow(cache['data'][0], cmap='bwr', vmin=-1, vmax=1, interpolation='nearest')
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04); cbar.set_label('Correlation')
     ax.set_xticks([]); ax.set_yticks([])
     main_title = ax.set_title(f"Clustered Asset Correlation ({n_clusters} Clusters)", fontsize=16, pad=30)
     date_subtitle = fig.text(0.5, 0.92, "Date Range", ha='center', fontsize=12, color='gray')
-
     def update(frame_num):
-        # Check if the requested frame is outside our current cached mini-chunk
         if not (cache['start_frame'] <= frame_num < cache['end_frame']):
             load_minicache(frame_num)
-
-        # Calculate the frame's index *within* the currently loaded mini-chunk
         local_frame_idx = frame_num - cache['start_frame']
-
         im.set_data(cache['data'][local_frame_idx])
         date_subtitle.set_text(date_strings[frame_num])
-
         return im, date_subtitle
-
     ani = animation.FuncAnimation(fig, update, frames=total_frames, blit=True, interval=50)
-    writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='MyScript'), bitrate=4000,
-                                         extra_args=['-vcodec', 'h264_qsv', '-preset', 'fast'])
-
+    writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='MyScript'), bitrate=4000, extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast'])
     print(f"Stitching video: {output_filename}...")
     ani.save(output_filename, writer=writer)
     plt.close(fig)
@@ -277,23 +268,15 @@ if __name__ == '__main__':
 
     # --- Parameters for a FULL run ---
     lookback = 252
-    num_threads_to_use = os.cpu_count() - 2
+    STEP_SIZE_DAYS = 5  # Process one frame every 5 trading days (i.e., weekly)
+    num_threads_to_use = max(1, os.cpu_count() - 2)
     cluster_values_to_run = [3, 5, 8, 10]
 
-    # --- Parameters for a QUICK test run (uncomment to use) ---
-    # lookback = 30
-    # num_threads_to_use = 2
-    # cluster_values_to_run = [3]
-
     print(f"Using {num_threads_to_use} threads for parallel processing.")
+    print(f"Clustering every {STEP_SIZE_DAYS} days (weekly).")
     print("Loading data...")
     df_full = pd.read_parquet('log_returns_by_ticker.parquet')
 
-    # --- To use a slice for testing, uncomment these lines ---
-    # df = df_full.iloc[:200, :50]
-    # print(f"Data SLICED to: {df.shape[0]} rows, {df.shape[1]} assets for the test.")
-
-    # Use the full dataframe by default
     df = df_full
     print(f"Data loaded: {df.shape[0]} rows, {df.shape[1]} assets.")
 
@@ -301,16 +284,21 @@ if __name__ == '__main__':
         print(f"\n{'='*30}\n  STARTING RUN FOR {num_clusters} CLUSTERS  \n{'='*30}\n")
         matrix_output_dir = f"temp_matrices_{num_clusters}clusters"
 
-        temp_dir = parallel_generate_matrices(
-            asset_returns_df=df, lookback_period=lookback, n_clusters_to_form=num_clusters,
-            num_threads=num_threads_to_use, output_dir=matrix_output_dir)
+        # temp_dir = parallel_generate_matrices(
+        #     asset_returns_df=df,
+        #     lookback_period=lookback,
+        #     n_clusters_to_form=num_clusters,
+        #     step_size=STEP_SIZE_DAYS,
+        #     num_threads=num_threads_to_use,
+        #     output_dir=matrix_output_dir
+        # )
 
-        final_movie_name = f"final_correlation_movie_{num_clusters}clusters.mp4"
+        final_movie_name = f"final_correlation_movie_{num_clusters}clusters_weekly.mp4"
         render_video_from_streamed_chunks(
-            matrix_dir=temp_dir,
+            matrix_dir="temp_matrices_3clusters",#temp_dir,
             output_filename=final_movie_name,
             n_clusters=num_clusters,
-            render_ram_budget_gb=4.0  # Set the rendering RAM budget here. 4GB is a safe default.
+            render_ram_budget_gb=15
         )
 
         print(f"Cleaning up temporary matrix chunks in {temp_dir}...")
