@@ -703,7 +703,7 @@ def calculate_pnl(forecast_df, actual_df, pnl_strategy="weighted", percentile=0.
         positions = pd.DataFrame(0, index=forecast_df.index, columns=forecast_df.columns)
         iter=forecast_df.shape[0]
 
-        for i in iter:
+        for i in range(iter):
             abs_val=forecast_df.iloc[i,:].abs()
             sorted=abs_val.sort_values(ascending=False)
             cutoff_number=int(abs_val.shape[0]*(1-percentile))
