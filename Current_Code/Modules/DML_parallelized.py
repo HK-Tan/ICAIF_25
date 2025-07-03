@@ -25,6 +25,7 @@ import matplotlib.dates as mdates
 from multiprocessing import Pool
 import time
 from datetime import datetime
+import gc
 
 ###################### UTILITY FUNCTIONS ##################################################################
 
@@ -125,7 +126,7 @@ def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_v
 
     # Create lagged treatment variables
     # Recall that columns are days, and rows are tickers
-    Y_df_lagged = asset_df.iloc[start_idx:end_idx,:].copy() # 0:989 but 989 is excluded, 19:1008 but 1008 excluded
+    Y_df_lagged = asset_df.iloc[start_idx:end_idx,:] # 0:989 but 989 is excluded, 19:1009 but 1009 excluded
     W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
     T_df_lagged = make_lags(Y_df_lagged, p)
     Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
@@ -161,6 +162,7 @@ def evaluate_training_run(curr_cfg, asset_df, confound_df, lookback_days, days_v
         return root_mean_squared_error(Y_df_test, Y_hat_next)
     else:
         raise ValueError("Unsupported error metric.")
+    # Memory optimization: cleanup model
 
 
 # IZ: Function definition for a single future prediction (using found optimal p), used for parallelization
@@ -175,7 +177,7 @@ def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt,
     final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
     final_end_idx = day_idx  # Up to current day (exclusive in slicing), ie 1008
 
-    Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:].copy()  # Include current day for prediction
+    Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx+1,:]  # Include current day for prediction
     W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx+1,:], p_opt)
     T_df_lagged = make_lags(Y_df_lagged, p_opt)
     Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
@@ -202,20 +204,23 @@ def evaluate_prediction(day_idx, asset_df, confound_df, lookback_days, p_opt,
     Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
     theta = est.const_marginal_ate()
 
+    del est
+    gc.collect()
+
     # IZ: This should be a returned value in the function - will get automatically pushed to a results list by Pool
     return Y_base + T_df_test @ theta.T
 
-def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
-                                                 p_max=5,  # maximum number of lags
-                                                 model_y_name='extra_trees',
-                                                 model_t_name='extra_trees',
-                                                 model_y_params=None,
-                                                 model_t_params=None,
-                                                 cv_folds=5,
-                                                 lookback_days=252*4,  # 4 years of daily data
-                                                 days_valid=20,  # 1 month validation set
-                                                 error_metric='rmse',
-                                                 max_threads=1):
+def parallel_rolling_window_OR_VAR(asset_df, confound_df,
+                                    p_max=5,  # maximum number of lags
+                                    model_y_name='extra_trees',
+                                    model_t_name='extra_trees',
+                                    model_y_params=None,
+                                    model_t_params=None,
+                                    cv_folds=5,
+                                    lookback_days=252*4,  # 4 years of daily data
+                                    days_valid=20,  # 1 month validation set
+                                    error_metric='rmse',
+                                    max_threads=1):
 
     start_exec_time = time.time()
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -293,7 +298,7 @@ def parallel_rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
         'test_start': test_start,
         'num_days': num_days,
         'p_optimal': p_optimal,
-        'Y_hat_next_store': Y_hat_next_store,
+        'Y_hat_next_store': np.squeeze(Y_hat_next_store),
     }
 
     print("Completed predictions")
@@ -363,7 +368,7 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
     final_end_idx = train_end + 1                      # e.g. 1010
 
     # Outcome; same for both pre and post models
-    Y_df_lagged = asset_df.iloc[train_start:final_end_idx,:].copy()  
+    Y_df_lagged = asset_df.iloc[train_start:final_end_idx,:]
         # Exclusive of the last day, so 0:1009 (1009 is excluded) for training
         # This makes sense since "today" is day index of 1008, and we already know the value of the asset
         #   and hence, are allowed to train on it.
@@ -374,7 +379,7 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
     W_df_lagged = make_lags(confound_df.iloc[train_start:final_end_idx,:], 1)
 
     ### Initializing the pre model outside of the loop (before p = 2)
-    T_df_pre_lagged = make_lags(asset_df.iloc[train_start:final_end_idx,:].copy(), 1)
+    T_df_pre_lagged = make_lags(asset_df.iloc[train_start:final_end_idx,:], 1)
     Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_lagged)
 
     """
@@ -403,22 +408,22 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
         Control/Confounding = confound_lag1, confound_lag2
         """
 
-        W_df_pre_lagged = pd.concat([
-            W_df_pre_lagged,
-            confound_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}')
-        ], axis=1)
+        # Collect parts first, then concatenate once
+        confound_parts = [W_df_pre_lagged]
+        confound_parts.append(confound_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}'))
+        W_df_pre_lagged = pd.concat(confound_parts, axis=1)
     
         # Confounding variables for post model are the same as pre-model initially
-        W_df_post_lagged = W_df_pre_lagged.copy()
+        W_df_post_lagged = W_df_pre_lagged
 
         # Note that T_df_pre_lagged is already created at the end of the hypothesis testing loops
         #   and was designed to be carried over to the next iteration here.
 
         # Create post-model treatment variables (pre + current lag p)
-        T_df_post_lagged = pd.concat([
-            T_df_pre_lagged,
-            asset_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}')
-        ], axis=1)
+        # Collect parts first, then concatenate once
+        treatment_parts = [T_df_pre_lagged]
+        treatment_parts.append(asset_df.iloc[train_start:final_end_idx,:].shift(p).add_suffix(f'_lag{p}'))
+        T_df_post_lagged = pd.concat(treatment_parts, axis=1)
 
         # Realign models
         Y_df_pre_lagged, T_df_pre_lagged, W_df_pre_lagged = realign(Y_df_lagged, T_df_pre_lagged, W_df_pre_lagged)
@@ -442,6 +447,10 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
         theta_pre = est_pre_inf.mean_point.ravel()  # Flatten to 1-D vector
         cov_pre = est_pre_inf.mean_pred_stderr.ravel()
 
+        # Memory optimization: cleanup pre-model
+        del est_pre
+        gc.collect()
+
         ### Post Model
         est_post = LinearDML(
             model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
@@ -456,6 +465,10 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
         est_post_inf = est_post.const_marginal_ate_inference()
         theta_post = est_post_inf.mean_point.ravel()  # Flatten to 1-D vector
         cov_post = est_post_inf.mean_pred_stderr.ravel()
+
+        # Memory optimization: cleanup post-model
+        del est_post
+        gc.collect()
         
         T_names_pre = T_df_pre_lagged.columns.tolist()
         T_names_post = T_df_post_lagged.columns.tolist()
@@ -558,6 +571,9 @@ def ORACLE_evaluate_training_run(curr_cfg, asset_df, confound_df, test_start, lo
     # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
     #   so this is consistent!
 
+    del est
+    gc.collect()
+
     return (last_valid_p, np.squeeze(which_lag_control), np.squeeze(which_lag_treatment), np.squeeze(Y_hat_next_store))
 
 
@@ -583,17 +599,9 @@ def parallel_rolling_window_ORACLE_VAR(asset_df, confound_df,
     test_start = lookback_days  # Start of the test set after training and validation
     num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
                                   # minus one day off since we cannot train on the last day
-    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
-    which_lag_control = np.zeros((num_days - test_start, p_max+1))  # Store which lag is in the control set for each day
-    which_lag_treatment_initial = np.zeros((num_days - test_start, p_max+1))  # Store which lag is in the treatment set for each day
-    which_lag_treatment_initial[:,1] = 1  # The first lag is always in treatment variable  (rows = days, columns = lags)
-    # Here, to match the column index with the lag value, we set the column with index 1 (ie second) to be 1.
-    Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
 
     if len(asset_df) < lookback_days + 1:
         raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
-
-    runs_configs_list = [(day_idx) for day_idx in range(test_start, num_days)]
 
     with Pool(max_threads) as pool:
         search_results = pool.starmap(ORACLE_evaluate_training_run,
