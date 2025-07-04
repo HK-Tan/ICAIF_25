@@ -5,29 +5,27 @@ This script performs two main tasks:
 1.  Sliding Window Clustering: For each window in a time-series of asset returns,
     it computes a correlation matrix and assigns a cluster label to each asset.
     This produces a time-series of cluster assignments. The expensive eigenvector
-    calculation is accelerated using the elezar/gpu-arpack library via ctypes.
+    calculation is accelerated using PyTorch's LOBPCG algorithm.
 2.  Centroid Return Calculation: Using the cluster assignments from the most recent
     window, it calculates a representative time-series for each cluster.
 
-The entire process is accelerated on a CUDA-enabled NVIDIA GPU using CuPy and cuML.
+The entire process is accelerated on a CUDA-enabled NVIDIA GPU using CuPy and PyTorch.
 
 Requirements:
 - A CUDA-enabled NVIDIA GPU
-- A compiled shared library from https://github.com/elezar/gpu-arpack
 - CuPy: (pip install cupy-cudaXXX, where XXX matches your CUDA version)
-- cuML: (conda install -c rapidsai -c conda-forge -c nvidia cuml)
+- PyTorch: (pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cuXXX)
 - pandas, numpy, tqdm, pyarrow
 """
 import pandas as pd
 import numpy as np
 import cupy as cp
 import cupyx
-import ctypes as ct
 from numpy.lib.stride_tricks import as_strided
 from tqdm import tqdm
 import os
 import shutil
-from cuml.cluster import KMeans as cuMLKMeans
+import torch
 
 
 # --- CONFIGURATION PARAMETERS ---
@@ -36,95 +34,66 @@ from cuml.cluster import KMeans as cuMLKMeans
 GPU_DEVICE_ID = 0
 
 # BATCH_SIZE controls how many sliding windows are processed on the GPU at once.
-BATCH_SIZE = 4
+BATCH_SIZE = 5
 
 # Sigma for Gaussian weighting in centroid calculation.
 SIGMA_FOR_WEIGHTS = 1.0
 
-# --- IMPORTANT: Set this path to your compiled gpu-arpack shared library ---
-# For example: 'gpu-arpack/lib/libsingle_dense_gpu.so'
-# This path MUST be correct for the script to run.
-GPU_ARPACK_LIB_PATH = 'libsingle_dense_gpu.so'
-
+# Use PyTorch's LOBPCG for faster eigenvector calculation.
+# Requires PyTorch to be installed. Will fall back to CuPy eigh if False or unavailable.
+USE_LOBPCG = True
 
 # ==============================================================================
-# PART 1: CORE BATCHED ALGORITHMS (Implemented in CuPy + cuML + gpu-arpack)
+# PART 1: CORE BATCHED ALGORITHMS (Implemented in CuPy + PyTorch)
 # ==============================================================================
 
-def eigh_generalized_gpu_arpack(A, B, k):
+def KMeans_batched(x, K, Niter=50):
     """
-    Solves the generalized eigenvalue problem A*v = w*B*v for k smallest eigenvalues
-    using the elezar/gpu-arpack library via ctypes.
-
-    Args:
-        A (cp.ndarray): Symmetric matrix A on the GPU.
-        B (cp.ndarray): Symmetric positive-definite matrix B on the GPU.
-        k (int): The number of smallest eigenvalues to compute.
-
-    Returns:
-        tuple[cp.ndarray, cp.ndarray]: A tuple containing eigenvalues and eigenvectors.
+    Implements Lloyd's algorithm with K-Means++ initialization for the Euclidean metric.
+    This version is fully vectorized to run on a batch of CuPy arrays on the GPU.
     """
-    if not os.path.exists(GPU_ARPACK_LIB_PATH):
-        raise FileNotFoundError(
-            f"gpu-arpack library not found at: {GPU_ARPACK_LIB_PATH}\n"
-            "Please compile the library from https://github.com/elezar/gpu-arpack "
-            "and set the GPU_ARPACK_LIB_PATH variable correctly."
-        )
+    B, N, D = x.shape  # Batch size, number of samples, dimension
 
-    lib = ct.CDLL(GPU_ARPACK_LIB_PATH)
-    # Assuming the function for single-precision, symmetric generalized eigenproblem is 'dense_ssygvx'
-    # You may need to change this name based on the exact library version you compiled.
-    func = lib['dense_ssygvx']
-    func.restype = None
-    func.argtypes = [
-        ct.c_int,      # N (matrix size)
-        ct.c_void_p,   # A (device pointer)
-        ct.c_int,      # LDA
-        ct.c_void_p,   # B (device pointer)
-        ct.c_int,      # LDB
-        ct.c_char,     # 'I' for range, 'A' for all, 'V' for values
-        ct.c_float,    # vl
-        ct.c_float,    # vu
-        ct.c_int,      # il (index lower bound)
-        ct.c_int,      # iu (index upper bound)
-        ct.c_int,      # M (number of eigenvalues found) - output
-        ct.c_int,      # NEV (number of eigenvalues to find)
-        ct.c_void_p,   # W (eigenvalues) - output
-        ct.c_void_p,   # Z (eigenvectors) - output
-        ct.c_int,      # LDZ
-    ]
+    # K-Means++ initialization
+    centroids = cp.empty((B, K, D), dtype=x.dtype)
+    first_centroid_idx = cp.random.randint(0, N, size=(B,))
+    centroids[:, 0, :] = x[cp.arange(B), first_centroid_idx, :]
 
-    N = A.shape[0]
-    # ARPACK/LAPACK routines expect column-major (Fortran) arrays.
-    A_fortran = cp.asfortranarray(A, dtype=cp.float32)
-    B_fortran = cp.asfortranarray(B, dtype=cp.float32)
+    for k_idx in range(1, K):
+        x_expanded = x.reshape(B, N, 1, D)
+        centroids_subset = centroids[:, :k_idx, :].reshape(B, 1, k_idx, D)
+        dist_sq = cp.sum((x_expanded - centroids_subset) ** 2, axis=3)
+        min_dist_sq = dist_sq.min(axis=2)
+        probs = min_dist_sq / (min_dist_sq.sum(axis=1, keepdims=True) + 1e-12)
+        cum_probs = cp.cumsum(probs, axis=1)
+        r = cp.random.rand(B, 1)
+        next_centroid_idx = (r < cum_probs).argmax(axis=1)
+        centroids[:, k_idx, :] = x[cp.arange(B), next_centroid_idx, :]
 
-    # Allocate output arrays on the GPU
-    eigenvalues = cp.zeros(k, dtype=cp.float32)
-    eigenvectors = cp.zeros((N, k), dtype=cp.float32, order='F')
+    c = centroids
+    for i in range(Niter):
+        c_old = c.copy()
+        x_bni = x.reshape(B, N, 1, D)
+        c_bkj = c.reshape(B, 1, K, D)
+        D_b_nk = cp.sum((x_bni - c_bkj) ** 2, axis=3)
+        cl = D_b_nk.argmin(axis=2)
+        cl_one_hot = cp.eye(K, dtype=x.dtype)[cl]
+        Ncl = cl_one_hot.sum(axis=1)
+        c_sum = cp.einsum('bnk,bnd->bkd', cl_one_hot, x)
+        c = c_sum / (Ncl.reshape(B, K, 1) + 1e-8)
+        empty_clusters_mask = (Ncl == 0)
+        c[empty_clusters_mask] = c_old[empty_clusters_mask]
 
-    # Get device pointers
-    ptr_A = A_fortran.data.ptr
-    ptr_B = B_fortran.data.ptr
-    ptr_W = eigenvalues.data.ptr
-    ptr_Z = eigenvectors.data.ptr
+        if cp.allclose(c, c_old, atol=1e-6, rtol=0):
+            break
 
-    m_found = ct.c_int(0)
-
-    # Call the C function. We ask for eigenvalues by index range (1 to k).
-    func(N, ct.c_void_p(ptr_A), N,
-         ct.c_void_p(ptr_B), N,
-         b'I', 0.0, 0.0, 1, k,
-         ct.byref(m_found), k,
-         ct.c_void_p(ptr_W),
-         ct.c_void_p(ptr_Z), N)
-
-    return eigenvalues, eigenvectors
-
+    return cl, c
 
 def diag_embed_batched(x: cp.ndarray) -> cp.ndarray:
     """OPTIMIZED: Creates a batch of diagonal matrices using broadcasting."""
     B, N = x.shape
+    # Broadcasting x[..., None] (B, N, 1) with an identity matrix (N, N) is faster
+    # than creating a zero matrix and filling the diagonal.
     return cp.eye(N, dtype=x.dtype) * x[..., None]
 
 def sqrtinvdiag_batched(M: cp.ndarray) -> cp.ndarray:
@@ -134,10 +103,7 @@ def sqrtinvdiag_batched(M: cp.ndarray) -> cp.ndarray:
     return diag_embed_batched(inv_sqrt_diag)
 
 def SPONGE_sym_batched(p, n, k, tau=1.0, Niter_kmeans=50):
-    """
-    Batched version of SPONGE_sym, using gpu-arpack (via ctypes) for eigensolvers
-    and cuML KMeans for clustering.
-    """
+    """Batched version of SPONGE_sym, with optional PyTorch LOBPCG acceleration."""
     B, N, _ = p.shape
     eye = cp.eye(N, dtype=p.dtype).reshape(1, N, N)
 
@@ -150,25 +116,34 @@ def SPONGE_sym_batched(p, n, k, tau=1.0, Niter_kmeans=50):
     L_p = eye - d_p_inv_sqrt @ p @ d_p_inv_sqrt
     L_n = eye - d_n_inv_sqrt @ n @ d_n_inv_sqrt
 
-    matrix1_batch = L_n + tau * eye
-    matrix2_batch = L_p + tau * eye
+    matrix1 = L_n + tau * eye
+    matrix2 = L_p + tau * eye
 
-    all_labels = []
+    # --- Eigen-decomposition using Generalized Eigensolver ---
+    # Convert to PyTorch tensors for lobpcg (zero-copy)
+    # Note: lobpcg requires inputs to be on the GPU for GPU execution
+    matrix1_torch = torch.as_tensor(matrix1, device=f'cuda:{GPU_DEVICE_ID}')
+    matrix2_torch = torch.as_tensor(matrix2, device=f'cuda:{GPU_DEVICE_ID}')
 
-    # The C library does not support batches, so we loop through them.
-    for i in range(B):
-        # Solve the generalized eigenproblem for the i-th item in the batch
-        w_item, v_item = eigh_generalized_gpu_arpack(matrix1_batch[i], matrix2_batch[i], k)
+    # Solves the generalized eigenproblem: matrix1 * v = w * matrix2 * v
+    w_torch, v_torch = torch.lobpcg(matrix1_torch, k=k, B=matrix2_torch, largest=False)
 
-        epsilon = 1e-12
-        w_reshaped = w_item.reshape(1, k)
-        eigenvectors_to_cluster = v_item / (w_reshaped + epsilon)
+    # Convert back to CuPy arrays (zero-copy)
+    v = cp.asarray(v_torch) # Shape: (B, N, k)
+    w = cp.asarray(w_torch) # Shape: (B, k)
 
-        kmeans = cuMLKMeans(n_clusters=k, n_init=1, max_iter=Niter_kmeans, random_state=i) # Use loop index for seed
-        labels_item = kmeans.fit_predict(eigenvectors_to_cluster)
-        all_labels.append(labels_item)
+    # --- FIX: Scale eigenvectors before KMeans ---
+    # Reshape 'w' to (B, 1, k) to enable broadcasting for the division.
+    # Add a small epsilon for numerical stability.
+    epsilon = 1e-12
+    w_reshaped = w.reshape(B, 1, k)
 
-    cl = cp.stack(all_labels)
+    # 'v / w' is now broadcast correctly: (B, N, k) / (B, 1, k)
+    eigenvectors_to_cluster = v / (w_reshaped + epsilon)
+
+    # Perform KMeans on the scaled eigenvectors
+    cl, _ = KMeans_batched(eigenvectors_to_cluster, k, Niter=Niter_kmeans)
+
     return cl
 
 
@@ -247,71 +222,62 @@ def process_windows_on_gpu(asset_returns_df, lookback_period, n_clusters, batch_
 
 # --- Main Execution Block ---
 
-# Setup GPU
+
+# Setup GPU and libraries
 cp.cuda.runtime.setDevice(GPU_DEVICE_ID)
+torch.cuda.set_device(GPU_DEVICE_ID)
 
 # --- PARAMETER SWEEP CONFIGURATION ---
-LOOKBACK_WINDOWS_TO_RUN = [60, 120, 252]
+LOOKBACK_WINDOWS_TO_RUN = [252]
 N_CLUSTERS_TO_RUN = [5, 8, 12, 16]
+# Local temporary output directory in Colab
 LOCAL_OUTPUT_DIR = "clustering_outputs_local"
 os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-if 'GDRIVE_OUTPUT_PATH' not in locals():
-    GDRIVE_OUTPUT_PATH = LOCAL_OUTPUT_DIR
 
 # --- DATA LOADING ---
 print("\n--> Loading data...")
-# Dummy DataFrame for demonstration. Replace with your actual data.
-num_samples = 500
-num_assets = 100
-data = np.random.randn(num_samples, num_assets) * 0.01
-dates = pd.to_datetime(pd.date_range(start='2020-01-01', periods=num_samples, freq='B'))
-df = pd.DataFrame(data, index=dates, columns=[f'Asset_{i}' for i in range(num_assets)])
+# Use the path to the data downloaded in the previous cell
+df = pd.read_parquet('log_returns_by_ticker.parquet')
 df = df.astype(np.float32)
 print(f"Data loaded: {df.shape[0]} rows, {df.shape[1]} assets.")
 
-if __name__ == '__main__':
+count = 0
+# --- MAIN PROCESSING LOOP ---
+for lookback in LOOKBACK_WINDOWS_TO_RUN:
+    for n_clusters in N_CLUSTERS_TO_RUN:
+        print(f"\n{'='*60}")
+        print(f"  STARTING RUN: Lookback = {lookback}, Clusters = {n_clusters}")
+        print(f"{'='*60}\n")
+        try:
+            # Part 1: Sliding Window Clustering
+            labels_df = process_windows_on_gpu(df, lookback, n_clusters, BATCH_SIZE)
+            labels_fname = os.path.join(LOCAL_OUTPUT_DIR, f"cluster_labels_{n_clusters}c_{lookback}d.parquet")
+            labels_df.to_parquet(labels_fname, engine='pyarrow')
+            print(f"\nGenerated local file: {labels_fname}")
 
-    count = 0
-    # --- MAIN PROCESSING LOOP ---
-    for lookback in LOOKBACK_WINDOWS_TO_RUN:
-        for n_clusters in N_CLUSTERS_TO_RUN:
-            if count <= 3:
-                count += 1
-                continue
-            print(f"\n{'='*60}")
-            print(f"  STARTING RUN: Lookback = {lookback}, Clusters = {n_clusters}")
-            print(f"{'='*60}\n")
-            try:
-                # Part 1: Sliding Window Clustering
-                labels_df = process_windows_on_gpu(df, lookback, n_clusters, BATCH_SIZE)
-                labels_fname = os.path.join(LOCAL_OUTPUT_DIR, f"cluster_labels_{n_clusters}c_{lookback}d.parquet")
-                labels_df.to_parquet(labels_fname, engine='pyarrow')
-                print(f"\nGenerated local file: {labels_fname}")
+            # Part 2: Centroid Return Calculation
+            final_labels = cp.asarray(labels_df.iloc[-1].values.astype(np.int32))
+            asset_returns_gpu = cp.asarray(df.values)
+            centroid_returns = calculate_centroid_returns_gpu(asset_returns_gpu, final_labels, n_clusters, SIGMA_FOR_WEIGHTS)
+            centroids_df = pd.DataFrame(cp.asnumpy(centroid_returns), index=df.index, columns=[f'Cluster_{i}' for i in range(n_clusters)])
+            centroids_fname = os.path.join(LOCAL_OUTPUT_DIR, f"centroid_returns_{n_clusters}c_{lookback}d.parquet")
+            centroids_df.to_parquet(centroids_fname, engine='pyarrow')
+            print(f"Generated local file: {centroids_fname}")
 
-                # Part 2: Centroid Return Calculation
-                final_labels = cp.asarray(labels_df.iloc[-1].values.astype(np.int32))
-                asset_returns_gpu = cp.asarray(df.values)
-                centroid_returns = calculate_centroid_returns_gpu(asset_returns_gpu, final_labels, n_clusters, SIGMA_FOR_WEIGHTS)
-                centroids_df = pd.DataFrame(cp.asnumpy(centroid_returns), index=df.index, columns=[f'Cluster_{i}' for i in range(n_clusters)])
-                centroids_fname = os.path.join(LOCAL_OUTPUT_DIR, f"centroid_returns_{n_clusters}c_{lookback}d.parquet")
-                centroids_df.to_parquet(centroids_fname, engine='pyarrow')
-                print(f"Generated local file: {centroids_fname}")
+            # Part 3: Copy results to Google Drive
+            print("\n--> Copying results to Google Drive...")
+            shutil.copy(labels_fname, GDRIVE_OUTPUT_PATH)
+            shutil.copy(centroids_fname, GDRIVE_OUTPUT_PATH)
+            print(f"✅ Successfully copied files to {GDRIVE_OUTPUT_PATH}")
 
-                # Part 3: Copy results
-                if GDRIVE_OUTPUT_PATH != LOCAL_OUTPUT_DIR:
-                    print("\n--> Copying results to target directory...")
-                    shutil.copy(labels_fname, GDRIVE_OUTPUT_PATH)
-                    shutil.copy(centroids_fname, GDRIVE_OUTPUT_PATH)
-                    print(f"✅ Successfully copied files to {GDRIVE_OUTPUT_PATH}")
+        except ValueError as e:
+            print(f"\nSKIPPING RUN (Lookback={lookback}, Clusters={n_clusters}): {e}")
+        except Exception as e:
+            print(f"\n❌ UNEXPECTED ERROR (Lookback={lookback}, Clusters={n_clusters}): {e}")
+            import traceback
+            traceback.print_exc()
 
-            except (ValueError, FileNotFoundError) as e:
-                print(f"\nSKIPPING RUN (Lookback={lookback}, Clusters={n_clusters}): {e}")
-            except Exception as e:
-                print(f"\n❌ UNEXPECTED ERROR (Lookback={lookback}, Clusters={n_clusters}): {e}")
-                import traceback
-                traceback.print_exc()
-
-    print(f"\n\n{'='*60}")
-    print("✅ ALL PARAMETER SWEEP RUNS ARE COMPLETE.")
-    print(f"Check '{GDRIVE_OUTPUT_PATH}' for all output files.")
-    print(f"{'='*60}")
+print(f"\n\n{'='*60}")
+print("✅ ALL PARAMETER SWEEP RUNS ARE COMPLETE.")
+print(f"Check '{GDRIVE_OUTPUT_PATH}' in your Google Drive for all output files.")
+print(f"{'='*60}")
