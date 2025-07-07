@@ -5,7 +5,7 @@ import numpy as np
 # --- 1. SETUP AND DATA LOADING ---
 
 # Directory path for the data file
-DATA_DIRECTORY = r'C:\Users\james\ICAIF_25\Current_Code\Data'
+DATA_DIRECTORY = r'C:\Users\james\Downloads'
 # Use the processed file for speed and cleanliness, if it exists
 PROCESSED_FILE_NAME = 'all_data_processed.parquet'
 ORIGINAL_FILE_NAME = 'all_data_consolidated.parquet'
@@ -82,33 +82,33 @@ print("Pivoting complete.")
 
 
 
-# --- 2. INSPECT NANS BEFORE PROCESSING ---
+# # --- 2. INSPECT NANS BEFORE PROCESSING ---
 
-print("\n--- Inspecting Data Before NaN Processing ---")
-print("Shape of the data:", log_returns_df.shape)
-print("Total number of NaN values:", log_returns_df.isna().sum().sum())
+# print("\n--- Inspecting Data Before NaN Processing ---")
+# print("Shape of the data:", log_returns_df.shape)
+# print("Total number of NaN values:", log_returns_df.isna().sum().sum())
 
-# Let's look at a stock that exists from the start (SPY) and one that IPO'd later (ZTS)
-# This will clearly show the pre-IPO NaNs
-tickers_to_inspect = [t for t in ['SPY', 'ZTS'] if t in log_returns_df.columns]
-if tickers_to_inspect:
-    print("\nLog returns for 'SPY' and 'ZTS' at the beginning of the dataset:")
-    # .head() will show the initial NaN for SPY and the pre-IPO NaNs for ZTS
-    print(log_returns_df[tickers_to_inspect].head())
+# # Let's look at a stock that exists from the start (SPY) and one that IPO'd later (ZTS)
+# # This will clearly show the pre-IPO NaNs
+# tickers_to_inspect = [t for t in ['SPY', 'ZTS'] if t in log_returns_df.columns]
+# if tickers_to_inspect:
+#     print("\nLog returns for 'SPY' and 'ZTS' at the beginning of the dataset:")
+#     # .head() will show the initial NaN for SPY and the pre-IPO NaNs for ZTS
+#     print(log_returns_df[tickers_to_inspect].head())
 
 
-# --- 3. PROCESS NAN VALUES ---
+# # --- 3. PROCESS NAN VALUES ---
 
-print("\n--- Processing NaN Values ---")
-print("Filling all NaN values with 0. This handles:")
-print("1. Pre-IPO periods (no stock exists, so 0 return).")
-print("2. Post-delisting periods (stock no longer trades, so 0 return).")
-print("3. Mid-series non-trading days (price is held constant, so 0 return).")
+# print("\n--- Processing NaN Values ---")
+# print("Filling all NaN values with 0. This handles:")
+# print("1. Pre-IPO periods (no stock exists, so 0 return).")
+# print("2. Post-delisting periods (stock no longer trades, so 0 return).")
+# print("3. Mid-series non-trading days (price is held constant, so 0 return).")
 
-# The .fillna() method is perfect for this. We use inplace=True to modify the DataFrame directly.
-log_returns_df.fillna(0, inplace=True)
+# # The .fillna() method is perfect for this. We use inplace=True to modify the DataFrame directly.
+# log_returns_df.fillna(0, inplace=True)
 
-print("Processing complete.")
+# print("Processing complete.")
 
 
 # --- 4. VERIFY THE CHANGES ---
@@ -116,10 +116,10 @@ print("Processing complete.")
 print("\n--- Verifying Data After NaN Processing ---")
 print("Total number of NaN values after processing:", log_returns_df.isna().sum().sum())
 
-if tickers_to_inspect:
-    print("\nLog returns for 'SPY' and 'ZTS' after processing:")
-    # Now, the same .head() call will show 0s instead of NaNs
-    print(log_returns_df[tickers_to_inspect].head())
+# if tickers_to_inspect:
+#     print("\nLog returns for 'SPY' and 'ZTS' after processing:")
+#     # Now, the same .head() call will show 0s instead of NaNs
+#     print(log_returns_df[tickers_to_inspect].head())
 
 print("\nFinal DataFrame Head:")
 print(log_returns_df.head())
@@ -147,7 +147,7 @@ else:
 
 
 # Save this new, useful DataFrame for future analysis
-LOG_RETURNS_FILE_NAME = 'log_returns_by_ticker.parquet'
+LOG_RETURNS_FILE_NAME = 'log_returns_w_NAs.parquet'
 log_returns_full_path = os.path.join(DATA_DIRECTORY, LOG_RETURNS_FILE_NAME)
 
 try:
