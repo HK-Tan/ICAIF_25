@@ -26,6 +26,7 @@ from multiprocessing import Pool
 import time
 from datetime import datetime
 import gc
+from DML_tools import calculate_pnl
 
 ###################### UTILITY FUNCTIONS ##################################################################
 
