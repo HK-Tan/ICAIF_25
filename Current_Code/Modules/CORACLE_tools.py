@@ -30,41 +30,19 @@ import gc
 # from parallelized_runs import calculate_pnl
 
 # Helper function to make lagged copies of a DataFrame
+
+def make_original_with_forecast_row(df):
+    """Create lagged DataFrame with an additional forecasting row"""
+    # Add forecast row with NaN values
+    forecast_row = pd.DataFrame({col: [np.nan] for col in df.columns})
+    return pd.concat([df, forecast_row], ignore_index=True) 
+
 def make_lags(df, p):
-    """
-    Create lagged copies of a DataFrame (withtout the original columns; ie starting from lag 1).
-
-    Parameters:
-    df (pd.DataFrame): The input DataFrame.
-    p (int): The number of lags to create.
-
-    Returns:
-    pd.DataFrame: A DataFrame with lagged columns.
-    """
-    if not isinstance(p, int): raise ValueError(f"Value of p for computing lags must be an integer, acutal value is p={p}")
-    return pd.concat([df.shift(k).add_suffix(f'_lag{k}') for k in range(1, p+1)], axis=1)
-
-def make_lags_with_orginal(df, p):
-    """
-    Create lagged copies of a DataFrame and include the original columns.
-
-    Parameters:
-    df (pd.DataFrame): The input DataFrame.
-    p (int): The number of lags to create.
-
-    Returns:
-    pd.DataFrame: A DataFrame with the original columns and the lagged columns.
-    """
-    lagged_df = make_lags(df, p)
-    return pd.concat([df, lagged_df], axis=1)
-
-def realign(Y,T,W):
-    # Remind me to check again
-    full = pd.concat([Y, T, W], axis=1).dropna()
-    Y_cols = Y.columns
-    T_cols = T.columns
-    W_cols = W.columns
-    return full[Y_cols], full[T_cols], full[W_cols]
+    """Create lagged DataFrame with p lags"""
+    # Does not contain the original columns, only the lagged ones
+    lagged_df = pd.concat([df.shift(i) for i in range(p + 1)], axis=1)
+    lagged_df.columns = [f"{col}_lag{i}" for i in range(p + 1) for col in df.columns]
+    return lagged_df
 
 #### A library of regressors that can be used with DML
 """
@@ -102,44 +80,270 @@ def get_regressor(regressor_name, force_multioutput=False, **kwargs):
     else:
         return base_model
 
+def predict_ahead_with_lag(asset_df, confound_df, p,
+                           model_y_name='extra_trees', model_t_name='extra_trees',
+                          model_y_params=None, model_t_params=None,
+                          cv_folds=5):
+    """
+    Predict (just) the next day's returns using a lagged VAR model with orthogonalized regression.
+    We will basically do OR and train VAR entirely on df and confound_df to predict the next day
+    for a given lag value p and cluster assignment (asset_df)
 
-def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
+    This will return a 1 x n array, where n is the number of assets in df representing the 
+    predicted returns for the next day for each of the assets in df.
+    """
+    if model_y_params is None:
+        model_y_params = {}
+    if model_t_params is None:
+        model_t_params = {}
+    
+    Y_df_lagged = make_original_with_forecast_row(asset_df)  # Include current day for prediction
+    T_df_lagged = make_lags(Y_df_lagged, p)
+    W_df_lagged = make_lags(make_original_with_forecast_row(confound_df), p)
+    
+    Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[p:-1,:], T_df_lagged.iloc[p:-1,:], W_df_lagged.iloc[p:-1,:]
+    Y_df_pred, T_df_pred, W_df_pred = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
+
+    est = LinearDML(
+        model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
+        model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
+        cv=TimeSeriesSplit(n_splits=cv_folds),
+        discrete_treatment=False,
+        random_state=0
+    )
+    est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
+
+    # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
+
+    # The structure is: est.models_y[0] contains the 5 CV fold models
+    Y_base_folds = []
+    for model in est.models_y[0]:
+        # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
+        pred = model.predict(W_df_pred)
+        Y_base_folds.append(pred)
+    Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
+    theta = est.const_marginal_ate()
+    Y_hat_next = Y_base + T_df_pred @ theta.T
+
+    # Memory optimization
+    del est, Y_base_folds
+    del Y_df_lagged, T_df_lagged, W_df_lagged
+    del Y_df_train, T_df_train, W_df_train
+    del Y_df_pred, T_df_pred, W_df_pred
+    gc.collect()
+
+    return Y_hat_next
+
+
+
+def memoized_evaluate_csv(clustered_df, confound_df, p_max=5,
+                          model_y_name='extra_trees', model_t_name='extra_trees',
+                          model_y_params=None, model_t_params=None,
+                          cv_folds=5, lookback_days=252, days_valid=5):
+    """
+    Note that clustered_df should have a total of lookback_days + days_valid rows + 1
+        (the +1 is to account for the fact that we are predicting the next day).
+    Note that the number of data points used to train VAR here would be lookback_days - days_valid
+        as part of the memoization technique here.
+    
+    With such a structure, we always assume that index lookback_days - 1 represents the current day,
+        and we would like to roll forward with the same "clustered_df" (recall that each of these df
+        corresponds to a particular cluster assignment obtained by using data from the lookback window
+        up till today). In other words, the assignment of clusters is frozen and we proceed to use the
+        same assignment to roll forward. 
+
+    The output dataframe will have:
+
+        > A total of k(p_max + 1) columns:
+            First k columns are predictions using p = 1
+            Second k columns are predictions using p = 2
+            ...
+            Second last k columns are predictions using p = p_max
+            Last k column are the actual returns for the next day (i.e. the "true" values).
+
+        > 2*days_valid rows (representing (days_valid - 1) days before the current day,
+            + current day + (days_valid - 1) ahead + additional day in the future of that to predict).
+    """
+    if model_y_params is None:
+        model_y_params = {}
+    if model_t_params is None:
+        model_t_params = {}
+    
+    train_days = lookback_days - days_valid # Number of days used for training
+    # If lookback_days = 252, days_valid = 5, then train_days = 252 - 5 = 247, then the first
+    #  247 rows will be used for training (thus 0:247, excluding index 247).
+    num_clusters = clustered_df.shape[1]  # Number of clusters (or assets)
+    Y_hat_next_store = np.zeros((2 * days_valid, num_clusters * (p_max + 1)))
+
+    # Roll forward and predict!
+    for i in range(2 * days_valid): # If days_valid = 5, we take index 0, 1, ..., 9
+        # Get the training set
+        Y_train_df = clustered_df.iloc[i:i + train_days,:]
+        W_train_df = confound_df.iloc[i:i + train_days,:]
+        for p in range(1, p_max+1):
+            Y_hat_next_store[i, (p - 1) * num_clusters:p * num_clusters] = predict_ahead_with_lag(Y_train_df, W_train_df, p,
+                        model_y_name=model_y_name, model_t_name=model_t_name,
+                        model_y_params=model_y_params, model_t_params=model_t_params,
+                        cv_folds=cv_folds)
+        Y_hat_next_store[i, -num_clusters:] = clustered_df.iloc[i + train_days,:].values
+
+    return Y_hat_next_store
+
+"""
+Missing: Saving it as a csv? Please help to implement this.
+"""
+
+def predict_tomorrow(memoized_clustered_dir, target_dir,
+                     todays_date,
+                     p_max=5,  # maximum number of lags
+                     model_y_name='extra_trees',
+                     model_t_name='extra_trees',
+                     model_y_params=None,
+                     model_t_params=None,
+                     cv_folds=5,
+                     lookback_days=252,  # 1 year of daily data
+                     days_valid=5):
+    """
+    The purpose of this function is to perform a hyperparameter tuning-like search
+    to determine the optimal value of p and cluster assignments to predict for next day's returns
+    using CORACLE-VAR using the memoized csv files. 
+
+    This is best illustrated with a concrete example:
+
+    Let's say we have a lookback window of 252 days (i.e. 1 year of daily data), with 5 days of validation. Suppose that we
+    start off on some todays_date, ie '2001-01-05', which corresponds to the 257th day (index 256), 
+    with the 252nd to 256th days (inclusive) being the validation set.
+    (Note that there is a "one-off" issue as compared to the implementation for ORACLE-VAR, depending on what 
+    is defined as the length of the lookback window.)
+
+    We also assume that we have a dataset with daily data from 2000-12-29 to 2021-12-01, which gives us a total of ~ 5,000 days of data.
+    For the csv file titled '2000-12-29.csv', the assumption is that this corresponds to a cluster assignment determined on the
+    lookback window of 252 days ending on 2000-12-29, and the cluster assignment is frozen for the next 20 (trading) days and 
+    one extra testing day to end on 2001-01-31 (inclusive). This also implies that we can only choose: days_valid <= 20.
+    These should be available in the memoized_clustered_dir directory.
+
+    With "+5 days of validation", the relevant csv files would then be
+    - '2000-12-29.csv' (for the 252 days ending on 2000-12-29),
+    - '2001-01-02.csv' (ending on the 253rd day, i.e. 2001-01-02),
+    - '2001-01-03.csv' (ending on the 254th day, i.e. 2001-01-03),
+    - '2001-01-04.csv' (ending on the 255th day, i.e. 2001-01-04),
+    - '2001-01-05.csv' (ending on the 256th day, i.e. 2001-01-05, 
+                        ie the supposed "today", which is also the last day of the validation set)
+
+    Now, let's say that we are looking at the folder reprsenting a fixed k-cluster assignment.
+    The hyperparameter search stage will then be done by looking over all possible values of p and their predictions,
+    plus all possible cluster assignments (i.e. all csv files in the folder - recall that each csv file is an assignment of clusters!)
+    The optimal cluster assignment and lag size p would be the one that minimizes the validation error ('rmse') 
+    over their corresponding validation set. How would this be done? 
+
+    Recall that each csv file is being outputted by the memoized_evaluate_csv function, which for each row, consists of
+    the predictions for the next day using p = 1, 2, ..., p_max, and the actual returns for the next day. Hence, it
+    suffices to find the index of the row corresponding to todays_date, and then the look backwards for the validation set,
+    and for each lag value (corresponding to k columns in their repsective column indices), calculate the rmse betwen the
+    prediction "row vector" and the actural returns "row vector" (the last k columns in the row), and then average them up
+    over the validation set (5 rows).
+
+    To optimize over the number of clusters, we will assume that the csv files are stored in memoized_clustered_dir as follows:
+    - memoized_clustered_dir/
+        - k5/
+            - 2000-12-29.csv
+            - 2001-01-02.csv
+            - 2001-01-03.csv
+            - 2001-01-04.csv
+            - 2001-01-05.csv
+        - k8/
+            - 2000-12-29.csv
+            - 2001-01-02.csv
+            - 2001-01-03.csv
+            - 2001-01-04.csv
+            - 2001-01-05.csv
+        - k12/
+            - 2000-12-29.csv
+            - 2001-01-02.csv
+            - 2001-01-03.csv
+            - 2001-01-04.csv
+            - 2001-01-05.csv
+
+    where k5, k8, k12 are the number of clusters (k) used to generate the cluster assignments.
+
+    We now obtain the optimal p and lag assignment for k clusters. Assuming that we have a total of K combinations of
+    the number of clusters, say K = 3 for k in {5,8,12}. Then, the total number of combinations to optimize over is given by
+    K * p_max * days_valid. 
+
+    The output of this function will be a DataFrame with the following structure:
+    - The first column is the date (i.e. todays_date).
+    - The second column is the optimal p value.
+    - The third column is the optimal number of clusters (ie 5 for k = 5)
+    - The fourth column is the assignment in terms of the name of the csv file corresponding to the cluster assignment.
+        i.e. '2001-01-04.csv' for the 256th day (i.e. the day before the current day)
+    - The next k columns are the predicted returns for the next day using the optimal p and cluster assignment.
+    - The next (last) k columns are the actual returns for the next day.
+    
+    
+    Inputs:
+    memoized_clustered_dir: Directory containing the memoized clustered CSV files.
+    target_dir: Directory to save the results.
+    todays_date: The date for which to make the prediction (e.g. '2001-01-05').
+    p_max: Maximum number of lags to consider (e.g. 5).
+    model_y_name: Name of the regressor to use for the outcome variable (e.g. 'extra_trees').
+    model_t_name: Name of the regressor to use for the treatment variable (e.g. 'extra_trees').
+    model_y_params: Dictionary of parameters for the outcome regressor.
+    model_t_params: Dictionary of parameters for the treatment regressor.
+    cv_folds: Number of cross-validation folds to use.
+    lookback_days: Number of days to use for the lookback window (e.g. 252).
+    days_valid: Number of days to use for validation (e.g. 5).
+    
+    Outputs:
+    A DataFrame with the optimal p, cluster assignment, predicted returns, and actual returns for the next day.
+    Refer to the details above.
+    """
+
+    pass # TODO: Implement this function
+
+def rolling_window_CORACLE_w_para_search(memoized_clustered_dir, full_confound_df, target_dir,
                                         p_max=5,  # maximum number of lags
                                         model_y_name='extra_trees',
                                         model_t_name='extra_trees',
                                         model_y_params=None,
                                         model_t_params=None,
                                         cv_folds=5,
-                                        lookback_days=252*4,  # 4 years of daily data
-                                        days_valid=20,  # 1 month validation set
+                                        lookback_days=252,  # 1 year of daily data
+                                        days_valid=5,  
                                         error_metric='rmse'):
     """
     The purpose of this function is to run a rolling window evaluation
-    using OR-VAR. The idea is that we will always run this via orthongalized regression
-    framework under DML. However, to determine the optimal value of p, we will run a
+    using CORACLE-VAR. The idea is that we will always run this via orthongalized regression
+    framework under DML. However, to determine the optimal value of p and cluster assignments, we will run a
     "hyperparameter"-like search over the lookback window (to prevent look-ahead bias).
 
     This is best illustrated with a concrete example:
 
-    Suppose we have a lookback window of 252*4 days (i.e. 4 years of daily data). For a fixed p,
-    the base model between the "treatment" and the "outcome" follows a linear relationship (under LinearDML),
-    and hence would be compututationally cheap to run. Coupled with machine learning methods for non-linear
-    relationships that runs fast (ie ExtraTreesRegressor), it makes it computationally feasible to
-    refresh our DML coefficients every day.
+    Let's say we have a lookback window of 252 days (i.e. 1 year of daily data), with 5 days of validation. Hence, we will
+    start off on the 257th day (index 256), with the 252nd to 256th days (inclusive) being the validation set.
+    (Note that there is a "one-off" issue as compared to the implementation for ORACLE-VAR, depending on what 
+    is defined as the length of the lookback window.)
 
-    Henceforth, we now split the lookback window into a training and a validation set. For instance, we can set
-    aside one month (~20 days) worth of data as a validation set, and use the rest as training data.
-    This means that for each value of p, we train on the training set, obtain the validation errors on the validation set,
-    and pick the value of p that minimizes the validation error. The validation error used here could either be
-    the RSME or the PnL, depending on the use case.
+    We also assume that we have a dataset with daily data from 2000-12-29 to 2021-12-01, which gives us a total of ~ 5,000 days of data.
+    For the csv file titled '2000-12-29.csv', the assumption is that this corresponds to a cluster assignment determined on the
+    lookback window of 252 days ending on 2000-12-29, and the cluster assignment is frozen for the next 20 (trading) days and 
+    one extra testing day to end on 2001-01-31 (inclusive). This also implies that we can only choose: days_valid <= 20.
+    These should be available in the memoized_clustered_dir directory.
 
-    Remark 1: As part of a potential extension, it is possible to also incorporate an extra parameter/hyperparameter
-    for the number of clusters if we are using clustering methods as a dimensionality reduction technique.
-    Alternatively, one could also have k to represent the top-k assets instead (top by market cap, etc).
+    With "+5 days of validation", the relevant csv files would then be
+    - '2000-12-29.csv' (for the 252 days ending on 2000-12-29),
+    - '2001-01-02.csv' (ending on the 253rd day, i.e. 2001-01-02),
+    - '2001-01-03.csv' (ending on the 254th day, i.e. 2001-01-03),
+    - '2001-01-04.csv' (ending on the 255th day, i.e. 2001-01-04),
+    - '2001-01-05.csv' (ending on the 256th day, i.e. 2001-01-05, 
+                        ie the supposed "today", which is also the last day of the validation set)
 
-    Remark 2: We are assuming the absence of a hyperparameter here. One could technically add more hyperparameters
-    like the size of lookback window, days_valid, etc. However, this would make the search space too large and
-    computationally expensive to run while overfitting the model. Hence, we will not do that here.
+    Now, let's say that we are looking at the folder reprsenting a fixed cluster assignment size k.
+    The hyperparameter search stage will then be done by looking over all possible values of p and their predictions,
+    plus all possible cluster assignments (i.e. all csv files in the folder - recall that each csv file is an assignment of clusters!)
+    The optimal cluster assignment and lag size p would be the one that minimizes the validation error averaged over the validation set.
+
+
+
 
     Inputs:
 
@@ -169,177 +373,3 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
     if model_t_params is None:
         model_t_params = {}
 
-
-    test_start = lookback_days  # Start of the test set after training and validation
-    num_days = asset_df.shape[0] - 1  # Total number of days in the dataset,
-                                      # minus one day off since we cannot train on the last day; ie 1299
-    p_optimal = np.zeros(num_days - test_start)  # Store optimal p for each day in the test set
-    Y_hat_next_store = np.zeros((num_days - test_start, asset_df.shape[1]))
-
-    if len(asset_df) < lookback_days + 1 or lookback_days <= days_valid:
-        raise ValueError("Dataset is too small for the specified lookback_days and days_valid.")
-
-    for day_idx in range(test_start, num_days):
-        # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
-        print("It is day", day_idx, "out of", num_days, "days in the dataset.")
-        # First, we perform a parameter search for the optimal p.
-        train_start = max(0, day_idx - lookback_days)   # e.g. 0
-        train_end = day_idx - days_valid                # e.g. 1008 - 20 = 988
-        valid_start = train_end + 1                     # e.g. 989
-        valid_end = valid_start + days_valid - 1        # e.g. 989 + 20 - 1 = 1008; total length = 20
-
-        valid_errors = []
-        for p in range(1, p_max + 1):
-            current_error = 0
-            for valid_shift in range(days_valid):
-                # e.g. valid_shift = 0, 19
-                start_idx = train_start + valid_shift    # e.g. 0 + 0, 0 + 19 = 19
-                end_idx = train_end + valid_shift + 2    # e.g. 988 + 0 + 2, 988 + 19 + 2 = 1009 (usually excluded)
-                # + 2 is to account for the fact that python slicing excludes the last element, and
-                # we need to set aside the element at the last row for validation.
-
-                # Create lagged treatment variables
-                # Recall that columns are days, and rows are tickers
-                Y_df_lagged = asset_df.iloc[start_idx:end_idx,:] # 0:989 but 989 is excluded, 19:1009 but 1009 excluded
-                W_df_lagged = make_lags(confound_df.iloc[start_idx:end_idx,:], p)
-                T_df_lagged = make_lags(Y_df_lagged, p)
-                Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-                Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-                Y_df_pred, T_df_pred, W_df_pred = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-                # In the last value of valid_shift = 19, then 19:1008 (1008 included) but we took out the 1008th element for
-                #  validation (hence :-1 in train), so we have 19:1007 (1007 included) for training.
-                # For validation, note that the predictive features are from T_df_pred and W_df_pred, to predict a value of Y_df_pred
-                #  To test/evaluate the error, Y_df_pred is "true" (ie the correct Y at index 1008), and we predict this
-                #  with the prediction part of this ie Y_hat_next, using T_df_lagged at 1008 and W_df_lagged at 1008.
-                #  Here, this is correct since T_df_lagged and W_df_lagged contains minimially lag 1 variables.
-
-                est = LinearDML(
-                    model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-                    model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-                    cv=TimeSeriesSplit(n_splits=cv_folds),
-                    discrete_treatment=False,
-                    random_state=0
-                )
-                est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-                # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-                # The structure is: est.models_y[0] contains the 5 CV fold models
-                Y_base_folds = []
-                for model in est.models_y[0]:
-                    # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-                    pred = model.predict(W_df_pred)
-                    Y_base_folds.append(pred)
-
-                Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-                theta = est.const_marginal_ate()
-                Y_hat_next = Y_base + T_df_pred @ theta.T
-
-                # Obtain error in the desired metric and accumulate it over the validation window
-                if error_metric == 'rmse':
-                        current_error += root_mean_squared_error(Y_df_pred, Y_hat_next)
-                else:
-                    raise ValueError("Unsupported error metric.")
-                
-                # Memory optimization: cleanup model
-                del est
-                gc.collect()
-            valid_errors.append( (p,current_error) )
-        print("Validation errors for different p values:", valid_errors)
-        p_opt = min(valid_errors, key=lambda x: x[1])[0]  # Get the p with the minimum validation error
-        p_optimal[day_idx - test_start] = p_opt  # Store the optimal p for this day
-
-        # Once we have determined the optimal p value, we now fit with "today's" data set
-        # Recalculate indices for the full lookback window
-        final_start_idx = max(0, day_idx - lookback_days)  # Use full lookback window  # 1008 - 1008 = 0
-        final_end_idx = day_idx + 2 
-        # Max value of day_idx is num_days - 1, ie 1298, so we are allowed to get up 
-        #   to day_idx + 2 = 1300 (exclusive)
-
-        Y_df_lagged = asset_df.iloc[final_start_idx:final_end_idx,:]  # Include current day for prediction
-        W_df_lagged = make_lags(confound_df.iloc[final_start_idx:final_end_idx,:], p_opt)
-        T_df_lagged = make_lags(Y_df_lagged, p_opt)
-        Y_df_lagged, T_df_lagged, W_df_lagged = realign(Y_df_lagged, T_df_lagged, W_df_lagged)
-        # Note that the full data sets (up till train_end) are used for training
-        # For prediction, the corresponding lagged variables as obtained in the last row of the 
-        #   individual dataframe will be used to predict the outcome (ie "next day") since a time
-        #   series prediction model is written as a function of the previous values (time steps).
-        # Since these are lagged, obtaining the last row of it (apart from the outcome) even along the row
-        #    at which we are predicting, would still be the lagged values!
-        Y_df_train, T_df_train, W_df_train = Y_df_lagged.iloc[:-1,:], T_df_lagged.iloc[:-1,:], W_df_lagged.iloc[:-1,:]
-        Y_df_pred, T_df_pred, W_df_pred = Y_df_lagged.iloc[-1:,:], T_df_lagged.iloc[-1:,:], W_df_lagged.iloc[-1:,:]
-        # For day_idx = 1008, final_end_idx = 1008 + 2 = 1010, slicing includes the index = 1009 slice, which we 
-        #    remove so that we are training up till index 1008 (inclusive), and updating the predicted Y_hat
-        #    which corresponds to day with index 1009.
-        est = LinearDML(
-            model_y=get_regressor(model_y_name, force_multioutput=False, **model_y_params),
-            model_t=get_regressor(model_t_name, force_multioutput=False, **model_t_params),
-            cv=TimeSeriesSplit(n_splits=cv_folds),
-            discrete_treatment=False,
-            random_state=0
-        )
-        est.fit(Y_df_train, T_df_train, X=None, W=W_df_train)
-
-        # Prediction step: Y_hat = Y_base (from confounding) + T_next @ theta.T (from the "treatment effect")
-
-        # The structure is: est.models_y[0] contains the 5 CV fold models
-        Y_base_folds = []
-        for model in est.models_y[0]:
-            # Note: iterate through est.models_y[0] (each fold of the CV model), not est.models_y (the CV model)
-            pred = model.predict(W_df_pred)
-            Y_base_folds.append(pred)
-        Y_base = np.mean(np.array(Y_base_folds), axis = 0) # Average estimators over the folds
-        theta = est.const_marginal_ate()
-        Y_hat_next_store[day_idx-test_start,:] = Y_base + T_df_pred @ theta.T
-        # 0th row -> day_idx = 1008, 1st row -> day_idx = 1009, etc.
-        # ... last = 1298 - 1008 = 290th  row -> day_idx = 1298
-        # Note that the Y_hat_next_store is a matrix w/ num_days - test_start = 1299 - 1008 = 291 rows
-        #   so this is consistent!
-        
-        # Memory optimization: cleanup model
-        del est
-        gc.collect()
-    result = {
-        'test_start': test_start, 
-        'num_days': num_days,
-        'p_optimal': p_optimal,
-        'Y_hat_next_store': Y_hat_next_store,
-    }
-
-    return result
-
-
-def create_index_mapping(T_names_prev, T_names_post, d_y):
-    """
-    Create index mapping as 2-tuples (pre_idx, post_idx) for coefficient comparison.
-
-    Inputs:
-    - T_names_prev: List of treatment variable names from the previous coefficients.
-    - T_names_post: List of treatment variable names from the post coefficients.
-    - d_y: Number of assets (ie outcome) in the model, placed as the outcome variables.
-
-    Returns:
-    - idx_pairs: List of (pre_idx, post_idx) tuples for existing coefficients
-        i.e. Of the previous coefficients, which ones do they map to in the post coefficients?
-    - idx_new: List of post_idx for new coefficients
-    """
-    d_T_prev = len(T_names_prev)
-    d_T_post = len(T_names_post)
-
-    idx_pairs = []
-    idx_new = []
-
-    # Create mapping for all coefficients
-    for y in range(d_y):
-        for j_post, name_post in enumerate(T_names_post):
-            post_idx = y * d_T_post + j_post
-            if name_post in T_names_prev:
-                # This is an existing coefficient
-                j_prev = T_names_prev.index(name_post)
-                pre_idx = y * d_T_prev + j_prev
-                idx_pairs.append((pre_idx, post_idx))
-            else:
-                # If not, then this is a new coefficient
-                idx_new.append(post_idx)
-    
-    return idx_pairs, idx_new

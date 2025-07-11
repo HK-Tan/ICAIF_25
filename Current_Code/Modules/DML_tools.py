@@ -181,6 +181,8 @@ def rolling_window_OR_VAR_w_para_search(asset_df, confound_df,
 
     for day_idx in range(test_start, num_days):
         # The comments indicate what happens at day_idx = test_start = 1008, so the train set is w/ index 0 to 1007.
+        # Also, note that this means we have the data from the entire lookback window, plus "today", and we would 
+        #    like to predict for the next day (ie day_idx + 1 = 1009).
         print("It is day", day_idx, "out of", num_days, "days in the dataset.")
         # First, we perform a parameter search for the optimal p.
         train_start = max(0, day_idx - lookback_days)   # e.g. 0
