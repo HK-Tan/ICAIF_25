@@ -11,25 +11,41 @@ def extract_us_covid_data(input_file, output_file, chunk_size=10000):
         output_file (str): Path to the output CSV file
         chunk_size (int): Size of chunks to process at a time
     """
-    
     # Selected features to extract (modify as needed)
     selected_features = [
         'ConfirmedCases',
         'ConfirmedDeaths',
+        'PopulationVaccinated',
         'StringencyIndex_Average',
         'GovernmentResponseIndex_Average',
         'ContainmentHealthIndex_Average',
         'EconomicSupportIndex',
-        'C1M_School closing',
-        'C2M_Workplace closing',
-        'C3M_Cancel public events',
-        'C4M_Restrictions on gatherings',
-        'C6M_Stay at home requirements',
-        'H1_Public information campaigns',
-        'H2_Testing policy',
-        'H3_Contact tracing'
+        "C1M_School closing",
+        "C2M_Workplace closing",
+        "C3M_Cancel public events",
+        "C4M_Restrictions on gatherings",
+        "C6M_Stay at home requirements",
+        "C7M_Restrictions on internal movement",
+        "C8EV_International travel controls",
+        "E1_Income support",
+        "E2_Debt/contract relief",
+        "E3_Fiscal measures",
+        "E4_International support",
+        "H1_Public information campaigns",
+        "H2_Testing policy",
+        "H3_Contact tracing",
+        "H4_Emergency investment in healthcare",
+        "H5_Investment in vaccines",
+        "H6M_Facial Coverings",
+        "H7_Vaccination policy",
+        "H8M_Protection of elderly people",
+        "V1_Vaccine Prioritisation (summary)",
+        "V2A_Vaccine Availability (summary)",
+        "V2B_Vaccine age eligibility/availability age floor (general population summary)",
+        "V2C_Vaccine age eligibility/availability age floor (at risk summary)",
+        "V3_Vaccine Financial Support (summary)",
+        "V4_Mandatory Vaccination (summary)"
     ]
-    
     print("Starting US COVID data extraction...")
     
     # Initialize list to store US data
@@ -102,7 +118,8 @@ def extract_us_covid_data(input_file, output_file, chunk_size=10000):
         print("No valid feature data found!")
 
 if __name__ == "__main__":
-    input_file = "Current_Code/Data/COVID_DATA.csv"
+    input_file = "Current_Code/Data/COVID_DATA.csv" 
+    # This is the csv file obtained from https://data.humdata.org/dataset/oxford-covid-19-government-response-tracker
     output_file = "Current_Code/Data/USCOVIDDATA_20200101_20221231.csv"
 
     extract_us_covid_data(input_file, output_file)
